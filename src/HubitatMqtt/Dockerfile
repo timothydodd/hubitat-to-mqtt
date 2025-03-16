@@ -12,7 +12,7 @@ EXPOSE 8081
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
-COPY ["HubitatMqtt/HubitatMqtt.csproj", "api/"]
+COPY ["HubitatMqtt/HubitatMqtt.csproj", "HubitatMqtt/"]
 RUN dotnet restore "./HubitatMqtt/HubitatMqtt.csproj"
 
 COPY . .
