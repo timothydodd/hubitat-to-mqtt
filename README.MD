@@ -1,14 +1,3 @@
-## Features
-
-- **Bi-directional Communication**: Send device states from Hubitat to MQTT and control devices via MQTT topics
-- **Real-time Updates**: Receive instant device state changes via webhooks
-- **Reliability**: Hybrid approach with webhooks and periodic synchronization
-- **Flexible Topic Structure**: Clear, hierarchical MQTT topics for easy integration
-- **Smart Refresh Strategy**: Configurable rules for when to fetch complete device data
-- **Device Control**: Control Hubitat devices by publishing to MQTT topics
-- **Dual Addressing**: Access devices by name or ID for maximum flexibility
-- **In-Memory Caching**: Reduces API calls to Hubitat and improves performance
-- **Optional Authentication**: Support for both secured and unsecured MQTT brokers# Hubitat to MQTT Bridge
 
 This project creates a bridge between Hubitat Elevation home automation hub and MQTT, enabling integration with other smart home platforms and custom applications that support MQTT.
 
