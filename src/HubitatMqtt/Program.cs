@@ -124,9 +124,8 @@ namespace HubitatToMqtt
 
             app.UseResponseCaching();
             app.UseResponseCompression();
-
+            app.MapControllers();
             app.UseRouting();
-            app.UseDeveloperExceptionPage();
 
             app.UseHealthChecks("/health", new HealthCheckOptions { ResponseWriter = HealthCheck.WriteResponse });
 
