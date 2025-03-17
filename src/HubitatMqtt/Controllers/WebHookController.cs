@@ -48,7 +48,7 @@ public class WebhookController : ControllerBase
             var eventName = data.Content.Name;
             var eventValue = data.Content.Value;
 
-            _logger.LogInformation("Processing device event: Device {DeviceId}, Event {EventName}, Value {Value}",
+            _logger.LogDebug("Processing device event: Device {DeviceId}, Event {EventName}, Value {Value}",
                 deviceId, eventName, eventValue);
 
             Device? existingDevice = _deviceCache.GetDevice(deviceId);
@@ -65,7 +65,7 @@ public class WebhookController : ControllerBase
                 {
                     // Publish the full device data
                     await _mqttPublishService.PublishDeviceToMqttAsync(device);
-                    _logger.LogInformation("Published full device data for {DeviceId}", deviceId);
+                    _logger.LogDebug("Published full device data for {DeviceId}", deviceId);
                 }
                 else
                 {
@@ -143,7 +143,7 @@ public class WebhookController : ControllerBase
                 }
             }
 
-            _logger.LogInformation("Successfully published event to MQTT: Device {DeviceId}, Event {EventName}",
+            _logger.LogDebug("Successfully published event to MQTT: Device {DeviceId}, Event {EventName}",
                 deviceId, eventName);
         }
         catch (Exception ex)
