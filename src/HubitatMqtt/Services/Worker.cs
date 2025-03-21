@@ -12,7 +12,8 @@ namespace HubitatToMqtt
         private readonly MqttPublishService _mqttPublishService;
         private readonly DeviceCache _deviceCache;
         private DateTime _lastFullPollTime = DateTime.MinValue;
-        private bool _initialPollCompleted = false;
+        private readonly bool _clearTopicOnSync = false;
+        private readonly MqttSyncService _mqttSyncService;
 
         public Worker(
             ILogger<Worker> logger,
@@ -20,7 +21,8 @@ namespace HubitatToMqtt
             IMqttClient mqttClient,
             HubitatClient hubitatClient,
             MqttPublishService mqttPublishService,
-            DeviceCache deviceCache)
+            DeviceCache deviceCache,
+            MqttSyncService mqttSyncService)
         {
             _logger = logger;
             _configuration = configuration;
@@ -28,13 +30,12 @@ namespace HubitatToMqtt
             _hubitatClient = hubitatClient;
             _mqttPublishService = mqttPublishService;
             _deviceCache = deviceCache;
+            _clearTopicOnSync = configuration.GetValue<bool>("ClearTopicOnSync", true);
+            _mqttSyncService = mqttSyncService;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            // Perform initial poll at startup
-            await PerformFullPollAsync();
-            _initialPollCompleted = true;
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -81,12 +82,20 @@ namespace HubitatToMqtt
             {
                 _logger.LogInformation("Fetching all devices from Hubitat");
 
+                _deviceCache.Clear();
+
                 // Fetch data from Hubitat API using the HubitatClient
                 var devices = await _hubitatClient.GetAll();
+
 
                 // Publish to MQTT if we have data and are connected
                 if (devices != null && devices.Count > 0 && _mqttClient.IsConnected)
                 {
+                    if (_clearTopicOnSync)
+                    {
+
+                        await _mqttSyncService.SyncDevices(devices.Where(x => x.Id != null).Select(x => x.Id!).Distinct().ToHashSet() ?? new HashSet<string>());
+                    }
                     foreach (var device in devices)
                     {
                         // Update the device cache

@@ -21,7 +21,32 @@ namespace HubitatToMqtt
             _mqttClient = mqttClient;
             _configuration = configuration;
         }
-
+        public async Task RemoveTopic(string id)
+        {
+            if (!_mqttClient.IsConnected)
+            {
+                _logger.LogWarning("MQTT client not connected. Skipping publish");
+                return;
+            }
+            try
+            {
+                var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
+                var idTopic = $"{baseTopic}/device/{id}/#";
+                var idMessage = new MqttApplicationMessageBuilder()
+                    .WithTopic(idTopic)
+                    .WithPayload(new byte[0])
+                    .WithRetainFlag(true)
+                    .Build();
+                await _mqttClient.PublishAsync(idMessage);
+                _logger.LogDebug("Published attribute {Attribute}={Value} for device {DeviceId}",
+                    "purge", "purge", "purge");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error publishing attribute {Attribute} for device {DeviceId}",
+                    "purge", "purge");
+            }
+        }
         /// <summary>
         /// Publishes a full device to MQTT topics
         /// </summary>
