@@ -138,9 +138,6 @@ public class WebhookController : ControllerBase
                     {
                         existingDevice.Attributes[eventName] = eventValue;
                     }
-
-                    // Publish the complete device data
-                    await _mqttPublishService.PublishDeviceToMqttAsync(existingDevice);
                 }
             }
 
