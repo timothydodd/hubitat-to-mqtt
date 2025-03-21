@@ -63,6 +63,7 @@ public class WebhookController : ControllerBase
 
                 if (device != null)
                 {
+                    _deviceCache.AddDevice(device);
                     // Publish the full device data
                     await _mqttPublishService.PublishDeviceToMqttAsync(device);
                     _logger.LogDebug("Published full device data for {DeviceId}", deviceId);

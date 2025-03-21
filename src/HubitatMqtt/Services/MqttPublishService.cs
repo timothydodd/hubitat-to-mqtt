@@ -106,8 +106,17 @@ namespace HubitatToMqtt
                         {
                             continue;
                         }
+                        string valueString = "";
+                        var attrType = attrValue.GetType();
+                        if (attrType == typeof(string) || attrType.IsValueType)
+                        {
+                            valueString = attrValue?.ToString() ?? "";
+                        }
+                        else
+                        {
+                            valueString = JsonSerializer.Serialize(attrValue, Constants.JsonOptions);
+                        }
 
-                        string valueString = attrValue.ToString() ?? "";
 
                         await PublishAttributeToMqttAsync(device.Id, deviceName, attrName, valueString);
                     }

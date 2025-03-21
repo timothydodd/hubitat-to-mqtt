@@ -1,4 +1,6 @@
 ﻿using System.Text.Json;
+using System.Text.Json.Serialization;
+using HubitatMqtt.Common;
 
 
 public class HubitatClient
@@ -22,7 +24,8 @@ public class HubitatClient
         {
             response.EnsureSuccessStatusCode();
             var content = await response.Content.ReadAsStringAsync();
-            return JsonSerializer.Deserialize<List<Device>>(content, Constants.JsonOptions);
+            var d = JsonSerializer.Deserialize<List<Device>>(content, Constants.JsonOptions);
+            return d;
         }
         catch (Exception e)
         {
@@ -41,7 +44,8 @@ public class HubitatClient
         {
             response.EnsureSuccessStatusCode();
             var content = await response.Content.ReadAsStringAsync();
-            return JsonSerializer.Deserialize<Device>(content, Constants.JsonOptions);
+            var device = JsonSerializer.Deserialize<Device>(content, Constants.JsonOptions);
+            return device;
         }
         catch (Exception e)
         {
@@ -90,14 +94,12 @@ public class Device
     public string? Model { get; set; }
     public string? Manufacturer { get; set; }
     public string? Room { get; set; }
-    public List<string>? Capabilities { get; set; }
+    public List<object>? Capabilities { get; set; }
+    [JsonConverter(typeof(AttributesConverter))]
     public Dictionary<string, object?>? Attributes { get; set; }
-    public List<CommandModel>? Commands { get; set; }
+    public List<object>? Commands { get; set; }
     public dynamic? Metadata { get; set; }
 }
 
 
-public class CommandModel
-{
-    public string? Command { get; set; }
-}
+

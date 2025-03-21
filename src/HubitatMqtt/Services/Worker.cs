@@ -51,7 +51,7 @@ namespace HubitatToMqtt
                     }
 
                     // Sleep for a minute before checking again
-                    await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                    await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
                 }
                 catch (Exception ex)
                 {
@@ -91,11 +91,6 @@ namespace HubitatToMqtt
                 // Publish to MQTT if we have data and are connected
                 if (devices != null && devices.Count > 0 && _mqttClient.IsConnected)
                 {
-                    if (_clearTopicOnSync)
-                    {
-
-                        await _mqttSyncService.SyncDevices(devices.Where(x => x.Id != null).Select(x => x.Id!).Distinct().ToHashSet() ?? new HashSet<string>());
-                    }
                     foreach (var device in devices)
                     {
                         // Update the device cache
@@ -106,8 +101,15 @@ namespace HubitatToMqtt
 
                         await _mqttPublishService.PublishDeviceToMqttAsync(device);
                     }
-
                     _lastFullPollTime = DateTime.Now;
+                    if (_clearTopicOnSync)
+                    {
+
+                        await _mqttSyncService.SyncDevices(devices.Where(x => x.Id != null).Select(x => x.Id!).Distinct().ToHashSet() ?? new HashSet<string>());
+                    }
+
+
+
                     _logger.LogInformation("Synchronization completed successfully for {DeviceCount} devices", devices.Count);
                 }
                 else if (!_mqttClient.IsConnected)
