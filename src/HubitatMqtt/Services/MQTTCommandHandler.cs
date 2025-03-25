@@ -9,7 +9,7 @@ namespace HubitatToMqtt
         private readonly IConfiguration _configuration;
         private readonly IMqttClient _mqttClient;
         private readonly HubitatClient _hubitatClient;
-
+        private readonly string baseTopic;
         public MqttCommandHandler(
             ILogger<MqttCommandHandler> logger,
             IConfiguration configuration,
@@ -20,6 +20,7 @@ namespace HubitatToMqtt
             _configuration = configuration;
             _mqttClient = mqttClient;
             _hubitatClient = hubitatClient;
+            baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
         }
 
         public async Task StartAsync(CancellationToken cancellationToken)
@@ -52,13 +53,12 @@ namespace HubitatToMqtt
         {
             try
             {
-                var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
 
                 // Subscribe to direct device ID command topics
                 await _mqttClient.SubscribeAsync($"{baseTopic}/device/+/command/+");
 
                 // Subscribe to named device command topics (optional)
-                await _mqttClient.SubscribeAsync($"{baseTopic}/+/command/+");
+                await _mqttClient.SubscribeAsync($"{baseTopic}/device/+/command/+/+");
 
                 _logger.LogInformation("Subscribed to command topics");
             }
@@ -73,14 +73,13 @@ namespace HubitatToMqtt
             try
             {
                 var topic = args.ApplicationMessage.Topic;
-                var payload = args.ApplicationMessage.ConvertPayloadToString();
 
-                _logger.LogInformation("Received command on topic {Topic} with payload {Payload}", topic, payload);
+                _logger.LogInformation("Received command on topic {Topic}", topic);
 
                 // Extract device ID and command from the topic
                 var deviceId = ExtractDeviceId(topic);
                 var command = ExtractCommand(topic);
-
+                var value = ExtractValue(topic);
                 if (string.IsNullOrEmpty(deviceId) || string.IsNullOrEmpty(command))
                 {
                     _logger.LogWarning("Invalid command topic format: {Topic}", topic);
@@ -88,7 +87,7 @@ namespace HubitatToMqtt
                 }
 
                 // Send the command to Hubitat
-                await SendCommandToHubitat(deviceId, command, payload);
+                await SendCommandToHubitat(deviceId, command, value);
             }
             catch (Exception ex)
             {
@@ -118,7 +117,12 @@ namespace HubitatToMqtt
                 var deviceName = namedMatch.Groups[1].Value;
                 return ResolveDeviceIdFromName(deviceName);
             }
-
+            var directIdPattern2 = $"^{baseTopic}/device/([^/]+)/command/([^/]+)(/([^/]+))?$";
+            var directMatch2 = Regex.Match(topic, directIdPattern2);
+            if (directMatch2.Success && directMatch2.Groups.Count > 1)
+            {
+                return directMatch2.Groups[1].Value;
+            }
             return null;
         }
 
@@ -135,9 +139,25 @@ namespace HubitatToMqtt
                 return match.Groups[1].Value;
             }
 
+            var directIdPattern2 = $"^{baseTopic}/device/([^/]+)/command/([^/]+)(/([^/]+))?$";
+            var directMatch2 = Regex.Match(topic, directIdPattern2);
+            if (directMatch2.Success && directMatch2.Groups.Count > 2)
+            {
+                return directMatch2.Groups[2].Value;
+            }
             return null;
         }
+        private string? ExtractValue(string topic)
+        {
 
+            var directIdPattern2 = $"^{baseTopic}/device/([^/]+)/command/([^/]+)(/([^/]+))?$";
+            var directMatch2 = Regex.Match(topic, directIdPattern2);
+            if (directMatch2.Success && directMatch2.Groups.Count > 4)
+            {
+                return directMatch2.Groups[4].Value;
+            }
+            return null;
+        }
         private string? ResolveDeviceIdFromName(string deviceName)
         {
             // In a production app, you would have a proper device name to ID mapping
@@ -158,7 +178,7 @@ namespace HubitatToMqtt
             return null;
         }
 
-        private async Task SendCommandToHubitat(string deviceId, string command, string value)
+        private async Task SendCommandToHubitat(string deviceId, string command, string? value)
         {
             try
             {
