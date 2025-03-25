@@ -57,7 +57,7 @@ public class HubitatClient
     public async Task SendCommand(string deviceId, string command, string? value)
     {
 
-        var v = value == null ? "" : $"/{value}";
+        var v = string.IsNullOrWhiteSpace(value) ? "" : $"/{value}";
         //encode title
         var url = $"{_settings.BaseUrl}/apps/api/{_settings.DeviceId}/devices/{deviceId}/{command}{v}?access_token={_settings.AccessToken}";
 
