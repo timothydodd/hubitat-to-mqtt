@@ -40,14 +40,10 @@ namespace HubitatToMqtt
 
             try
             {
-                string deviceName = !string.IsNullOrEmpty(device.Label)
-                    ? device.Label
-                    : (!string.IsNullOrEmpty(device.Name)
-                        ? device.Name
-                        : $"device_{device.Id}");
+
 
                 var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
-                //var deviceTopic = $"{baseTopic}/{SanitizeTopicName(deviceName)}";
+
 
 
                 // Also publish device by ID for direct control
@@ -85,11 +81,11 @@ namespace HubitatToMqtt
                         }
 
 
-                        await PublishAttributeToMqttAsync(device.Id, deviceName, attrName, valueString);
+                        await PublishAttributeToMqttAsync(device.Id, attrName, valueString);
                     }
                 }
 
-                _logger.LogDebug("Published device {DeviceId} ({DeviceName}) to MQTT", device.Id, deviceName);
+                _logger.LogDebug("Published device {DeviceId} ({DeviceName}) to MQTT", device.Id, device.Label);
             }
             catch (Exception ex)
             {
