@@ -98,7 +98,7 @@ public class Device
     [JsonConverter(typeof(AttributesConverter))]
     public Dictionary<string, object?>? Attributes { get; set; }
     public List<object>? Commands { get; set; }
-    public dynamic? Metadata { get; set; }
+
 }
 
 

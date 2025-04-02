@@ -17,6 +17,9 @@ public class WebhookController : ControllerBase
     private readonly MqttPublishService _mqttPublishService;
     private readonly DeviceCache _deviceCache;
 
+    readonly string[] _refreshEvents;
+    readonly string[] _alwaysRefreshDeviceTypes;
+
     public WebhookController(
         ILogger<WebhookController> logger,
         IMqttClient mqttClient,
@@ -31,11 +34,19 @@ public class WebhookController : ControllerBase
         _hubitatClient = hubitatClient;
         _mqttPublishService = mqttPublishService;
         _deviceCache = deviceCache;
+        // Get configurable list of events that should trigger a full refresh
+        var refreshEventsConfig = _configuration["Hubitat:FullRefreshEvents"] ?? "mode,hsm,alarm";
+        _refreshEvents = refreshEventsConfig.Split(',').Select(e => e.Trim().ToLower()).ToArray();
+
+        // Get configurable list of device types that should always be fully refreshed
+        var refreshDeviceTypesConfig = _configuration["Hubitat:FullRefreshDeviceTypes"] ?? "thermostat,lock,security";
+        _alwaysRefreshDeviceTypes = refreshDeviceTypesConfig.Split(',').Select(t => t.Trim().ToLower()).ToArray();
     }
 
     [HttpPost("event")]
     public async Task<IActionResult> PostEventAsync([FromBody] DeviceEvent data)
     {
+        // Quick validation and early return
         if (data.Content == null || string.IsNullOrEmpty(data.Content.DeviceId) || string.IsNullOrEmpty(data.Content.Name))
         {
             _logger.LogWarning("Received incomplete device event data");
@@ -51,94 +62,17 @@ public class WebhookController : ControllerBase
             _logger.LogDebug("Processing device event: Device {DeviceId}, Event {EventName}, Value {Value}",
                 deviceId, eventName, eventValue);
 
+            // Get device from cache
             Device? existingDevice = _deviceCache.GetDevice(deviceId);
-            // Determine if we should get the full device data
-            bool shouldRefreshFull = ShouldRefreshFullDevice(existingDevice, deviceId, eventName);
 
-            if (shouldRefreshFull)
+            // Determine if we need full refresh
+            if (ShouldRefreshFullDevice(existingDevice, deviceId, eventName))
             {
-                // Get full device details using the client
-                _logger.LogDebug("Performing full device refresh for {DeviceId} due to event {EventName}", deviceId, eventName);
-                var device = await _hubitatClient.Get(deviceId);
-
-                if (device != null)
-                {
-                    _deviceCache.AddDevice(device);
-                    // Publish the full device data
-                    await _mqttPublishService.PublishDeviceToMqttAsync(device);
-                    _logger.LogDebug("Published full device data for {DeviceId}", deviceId);
-                }
-                else
-                {
-                    _logger.LogWarning("Failed to retrieve full device data for {DeviceId}", deviceId);
-                    // Fall back to event-only update
-                    await PublishEventToMqttAsync(data);
-                }
+                await HandleFullDeviceRefresh(deviceId, data);
             }
             else
             {
-                // Just update the specific attribute
-                _logger.LogDebug("Performing attribute-only update for {DeviceId}.{EventName}", deviceId, eventName);
-
-                // We still need some device info to construct the topic
-                // Try to use cached device data first
-                string? deviceName = null;
-
-                // Check if we already have this device in our cache
-
-
-                // If we don't have the device in our cache, check if we have display name in the event
-                if (existingDevice == null)
-                {
-                    if (!string.IsNullOrEmpty(data.Content.DisplayName))
-                    {
-                        deviceName = data.Content.DisplayName;
-                    }
-                    else
-                    {
-                        // If we don't have a display name or device in cache, we need to fetch device info
-                        existingDevice = await _hubitatClient.Get(deviceId);
-                        if (existingDevice != null)
-                        {
-                            // Update the device cache
-                            _deviceCache.AddDevice(existingDevice);
-
-                            deviceName = !string.IsNullOrEmpty(existingDevice.Label)
-                                ? existingDevice.Label
-                                : (!string.IsNullOrEmpty(existingDevice.Name)
-                                    ? existingDevice.Name
-                                    : $"device_{deviceId}");
-
-
-                        }
-                        else
-                        {
-                            deviceName = $"device_{deviceId}";
-                        }
-                    }
-                }
-                else
-                {
-                    // Use the device name from cache
-                    deviceName = !string.IsNullOrEmpty(existingDevice.Label)
-                        ? existingDevice.Label
-                        : (!string.IsNullOrEmpty(existingDevice.Name)
-                            ? existingDevice.Name
-                            : $"device_{deviceId}");
-                }
-
-                // Update the specific attribute
-                await _mqttPublishService.PublishAttributeToMqttAsync(deviceId, deviceName, eventName, eventValue ?? string.Empty);
-
-                // If we had to fetch the device anyway, might as well publish the full data
-                if (existingDevice != null)
-                {
-                    // Update the attribute in the device object first
-                    if (existingDevice.Attributes != null && eventName != null && eventValue != null)
-                    {
-                        existingDevice.Attributes[eventName] = eventValue;
-                    }
-                }
+                await HandleAttributeUpdate(deviceId, eventName, eventValue, existingDevice, data);
             }
 
             _logger.LogDebug("Successfully published event to MQTT: Device {DeviceId}, Event {EventName}",
@@ -153,28 +87,58 @@ public class WebhookController : ControllerBase
         return Ok(new { message = "Received successfully" });
     }
 
+    // Extract methods to reduce complexity
+    private async Task HandleFullDeviceRefresh(string deviceId, DeviceEvent data)
+    {
+        _logger.LogDebug("Performing full device refresh for {DeviceId}", deviceId);
+        var device = await _hubitatClient.Get(deviceId);
+
+        if (device != null)
+        {
+            _deviceCache.AddDevice(device);
+            await _mqttPublishService.PublishDeviceToMqttAsync(device);
+            _logger.LogDebug("Published full device data for {DeviceId}", deviceId);
+        }
+        else
+        {
+            _logger.LogWarning("Failed to retrieve full device data for {DeviceId}", deviceId);
+            // Fall back to event-only update
+            await PublishEventToMqttAsync(data);
+        }
+    }
+
+    private async Task HandleAttributeUpdate(string deviceId, string eventName, string? eventValue, Device? existingDevice, DeviceEvent data)
+    {
+        _logger.LogDebug("Performing attribute-only update for {DeviceId}.{EventName}", deviceId, eventName);
+
+        // Update the specific attribute
+        await _mqttPublishService.PublishAttributeToMqttAsync(deviceId, eventName, eventValue ?? string.Empty);
+
+        // If we had to fetch a new device, update its attribute and publish full data
+        if (existingDevice?.Attributes != null && eventName != null && eventValue != null)
+        {
+            existingDevice.Attributes[eventName] = eventValue;
+            await _mqttPublishService.PublishDeviceToMqttAsync(existingDevice, false);
+        }
+    }
+
+
+
     private bool ShouldRefreshFullDevice(Device? device, string deviceId, string eventName)
     {
         if (device == null)
         {
             return true;
         }
-        // Get configurable list of events that should trigger a full refresh
-        var refreshEventsConfig = _configuration["Hubitat:FullRefreshEvents"] ?? "mode,hsm,alarm";
-        var refreshEvents = refreshEventsConfig.Split(',').Select(e => e.Trim().ToLower()).ToArray();
-
-        // Get configurable list of device types that should always be fully refreshed
-        var refreshDeviceTypesConfig = _configuration["Hubitat:FullRefreshDeviceTypes"] ?? "thermostat,lock,security";
-        var alwaysRefreshDeviceTypes = refreshDeviceTypesConfig.Split(',').Select(t => t.Trim().ToLower()).ToArray();
 
         // Check if this is a special event type that requires full refresh
-        if (refreshEvents.Contains(eventName.ToLower()))
+        if (_refreshEvents.Contains(eventName?.ToLower()))
         {
             return true;
         }
 
         // Check if this device type always requires full refresh
-        if (alwaysRefreshDeviceTypes.Contains(device.Type?.ToLower()))
+        if (_alwaysRefreshDeviceTypes.Contains(device.Type?.ToLower()))
         {
             return true;
         }

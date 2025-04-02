@@ -24,7 +24,7 @@ namespace HubitatToMqtt
         /// <summary>
         /// Publishes a full device to MQTT topics
         /// </summary>
-        public async Task PublishDeviceToMqttAsync(Device device)
+        public async Task PublishDeviceToMqttAsync(Device device, bool publishAttributes = true)
         {
             if (!_mqttClient.IsConnected)
             {
@@ -49,14 +49,6 @@ namespace HubitatToMqtt
                 var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
                 //var deviceTopic = $"{baseTopic}/{SanitizeTopicName(deviceName)}";
 
-                // Publish full device data
-                //var message = new MqttApplicationMessageBuilder()
-                //    .WithTopic(deviceTopic)
-                //    .WithPayload(JsonSerializer.Serialize(device))
-                //    .WithRetainFlag(true)
-                //    .Build();
-
-                //await _mqttClient.PublishAsync(message);
 
                 // Also publish device by ID for direct control
                 var idTopic = $"{baseTopic}/device/{device.Id}";
@@ -69,11 +61,12 @@ namespace HubitatToMqtt
                 await _mqttClient.PublishAsync(idMessage);
 
                 // Also publish individual attributes for easy access
-                if (device.Attributes != null)
+                if (device.Attributes != null && publishAttributes)
                 {
                     foreach (var attr in device.Attributes)
                     {
                         string attrName = attr.Key;
+
                         var attrValue = attr.Value;
 
                         if (attrValue == null)
@@ -107,7 +100,7 @@ namespace HubitatToMqtt
         /// <summary>
         /// Publishes a single device attribute to MQTT
         /// </summary>
-        public async Task PublishAttributeToMqttAsync(string deviceId, string deviceName, string attributeName, string attributeValue)
+        public async Task PublishAttributeToMqttAsync(string deviceId, string attributeName, string attributeValue)
         {
             if (!_mqttClient.IsConnected)
             {
@@ -118,15 +111,6 @@ namespace HubitatToMqtt
             {
                 var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
 
-                // Publish to named topic
-                //var attributeTopic = $"{baseTopic}/{SanitizeTopicName(deviceName)}/{SanitizeTopicName(attributeName)}";
-                //var message = new MqttApplicationMessageBuilder()
-                //    .WithTopic(attributeTopic)
-                //    .WithPayload(attributeValue)
-                //    .WithRetainFlag(true)
-                //    .Build();
-
-                // await _mqttClient.PublishAsync(message);
 
                 // Also publish to ID-based topic
                 var idAttributeTopic = $"{baseTopic}/device/{deviceId}/{SanitizeTopicName(attributeName)}";
@@ -159,8 +143,7 @@ namespace HubitatToMqtt
             }
 
             // Replace spaces, special chars, etc. to make a valid MQTT topic
-            return name.ToLowerInvariant()
-                .Replace(" ", "_")
+            return name.Replace(" ", "_")
                 .Replace("/", "_")
                 .Replace("+", "_")
                 .Replace("#", "_");
