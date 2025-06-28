@@ -1,29 +1,39 @@
+# Hubitat to MQTT Bridge
 
-This project creates a bridge between Hubitat Elevation home automation hub and MQTT, enabling integration with other smart home platforms and custom applications that support MQTT.
+This project creates a robust, production-ready bridge between Hubitat Elevation home automation hub and MQTT, enabling integration with other smart home platforms and custom applications that support MQTT.
 
 ## Features
 
 - **Bi-directional Communication**: Send device states from Hubitat to MQTT and control devices via MQTT topics
-- **Real-time Updates**: Receive instant device state changes via webhooks
-- **Reliability**: Hybrid approach with webhooks and periodic synchronization
+- **Real-time Updates**: Receive instant device state changes via webhooks with race condition protection
+- **Enhanced Reliability**: Hybrid approach with webhooks, periodic synchronization, and comprehensive error handling
 - **Flexible Topic Structure**: Clear, hierarchical MQTT topics for easy integration
 - **Smart Refresh Strategy**: Configurable rules for when to fetch complete device data
 - **Device Control**: Control Hubitat devices by publishing to MQTT topics
 - **Dual Addressing**: Access devices by name or ID for maximum flexibility
-- **Optional Authentication**: Support for both secured and unsecured MQTT brokers
+- **MQTT Authentication**: Support for both secured and unsecured MQTT brokers
+- **Thread-Safe Operations**: Concurrent webhook processing with proper synchronization
+- **Automatic Reconnection**: Intelligent MQTT reconnection with exponential backoff
+- **Comprehensive Logging**: Detailed logging for troubleshooting and monitoring
+- **Configuration Validation**: Startup validation prevents runtime configuration errors
+- **Topic Cleanup**: Automatic cleanup of stale MQTT topics during synchronization
 
 ## Architecture
 
-The project consists of two main components:
+The application consists of several key components working together:
 
 1. **WebAPI with Webhook Controller**: Receives real-time device events from Hubitat
 2. **Background Worker Service**: Performs periodic synchronization to ensure data consistency
+3. **Sync Coordinator**: Prevents race conditions between webhook updates and full sync operations
+4. **Device Cache**: Thread-safe, high-performance caching of device data
+5. **MQTT Services**: Robust publishing with retry logic and connection management
+6. **Command Handler**: Processes MQTT commands to control Hubitat devices
 
 ## Setup & Configuration
 
 ### Prerequisites
 
-- .NET 6.0 SDK or newer
+- .NET 9.0 SDK or newer
 - Hubitat Elevation hub with Maker API app installed
 - MQTT broker (like Mosquitto, HiveMQ, or Eclipse MQTT)
 
@@ -50,17 +60,29 @@ The project consists of two main components:
        "Port": 1883,
        "Username": "",  // Optional - leave empty for no authentication
        "Password": "",  // Optional - leave empty for no authentication
-       "BaseTopic": "hubitat"
+       "BaseTopic": "hubitat",
+       "MaxRetryAttempts": 3,        // Retry attempts for failed MQTT publishes
+       "RetryDelayMs": 1000,         // Delay between retry attempts
+       "SyncTimeoutMs": 10000        // Timeout for MQTT topic sync operations
      },
-     "SyncPollIntervalHours": 4  // Set to 0 to disable polling after initial sync
+     "SyncPollIntervalHours": 4,     // Set to 0 to disable polling after initial sync
+     "ClearTopicOnSync": true        // Clean up stale MQTT topics during sync
    }
    ```
 
 3. Build and run the application:
    ```bash
    dotnet build
-   dotnet run
+   dotnet run --project src/HubitatMqtt/HubitatMqtt.csproj
    ```
+
+### Docker Deployment
+
+Build and run using Docker:
+```bash
+docker build -t hubitat-mqtt -f src/HubitatMqtt/Dockerfile src/
+docker run -d --name hubitat-mqtt -p 8080:8080 -v /path/to/appsettings.json:/app/appsettings.json hubitat-mqtt
+```
 
 ### Hubitat Configuration
 
@@ -68,15 +90,13 @@ The project consists of two main components:
 2. Select the devices you want to expose to the API
 3. Note your Access Token and App ID
 4. Configure a webhook in the Maker API to point to your server:
-   - URL: `http://your-server-ip:port/api/hook/device/event`
+   - URL: `http://your-server-ip:8080/api/hook/device/event`
    - Method: POST
 
 ## MQTT Topic Structure
 
 The bridge publishes device states to MQTT topics using the following structure:
 
-- **Full Device Data (by name)**: `hubitat/{device_name}`
-- **Device Attributes (by name)**: `hubitat/{device_name}/{attribute_name}`
 - **Full Device Data (by ID)**: `hubitat/device/{device_id}`
 - **Device Attributes (by ID)**: `hubitat/device/{device_id}/{attribute_name}`
 - **Event Data**: `hubitat/device/{id}/events` (fallback for unknown devices)
@@ -86,54 +106,132 @@ The bridge publishes device states to MQTT topics using the following structure:
 To control devices, publish to the command topics:
 
 - **Command by device ID**: `hubitat/device/{device_id}/command/{command_name}`
-- **Command by device name**: `hubitat/{device_name}/command/{command_name}`
 
 The payload of the message should be the command parameter value. For commands without parameters, the payload can be empty.
 
-Example topics:
-- `hubitat/living_room_light/switch` → "on"
-- `hubitat/front_door_lock/lock` → "locked"
-- `hubitat/kitchen_motion/motion` → "active"
+**Example commands:**
+- Publish `"on"` to `hubitat/device/123/command/switch` to turn on device ID 123
+- Publish `"70"` to `hubitat/device/456/command/setTemperature` to set temperature to 70°
 
-Example command:
-- Publish "on" to `hubitat/device/123/command/switch` to turn on device ID 123
-- Publish "70" to `hubitat/living_room_thermostat/command/setTemperature` to set temperature
+**Example attribute topics:**
+- `hubitat/device/123/switch` → `"on"`
+- `hubitat/device/456/temperature` → `"72"`
+- `hubitat/device/789/battery` → `"85"`
 
 ## Smart Refresh Strategy
 
-The application uses a balanced approach to decide when to fetch complete device data:
+The application uses an intelligent approach to balance performance and reliability:
 
-1. **Configurable Event Types**: Events like mode changes, security alerts, or presence changes can be configured to always trigger a full device refresh.
+1. **Configurable Event Types**: Events like mode changes, security alerts, or presence changes trigger full device refresh
+2. **Configurable Device Types**: Complex devices like thermostats, locks, or security systems always use full device data
+3. **Periodic Synchronization**: Scheduled full synchronization ensures data consistency
+4. **Race Condition Prevention**: Sync coordinator prevents conflicts between webhook updates and full sync
 
-2. **Configurable Device Types**: Complex devices like thermostats, locks, or security systems can be configured to always use full device data.
+## Enhanced Logging
 
-3. **Periodic Synchronization**: Scheduled full synchronization ensures data consistency (configurable interval, default: 4 hours).
+The application provides comprehensive logging for monitoring and troubleshooting:
+
+### AlwaysRefreshDevice Logging
+For devices configured in `FullRefreshDeviceTypes`, detailed change logging is available:
+
+```
+[INFO] AlwaysRefreshDevice Update - Device: 123 (Front Door Lock) Type: lock | Trigger: lock=locked
+[INFO] AlwaysRefreshDevice Change - 123 (Front Door Lock) | lock: 'unlocked' → 'locked'
+[INFO] AlwaysRefreshDevice Change - 123 (Front Door Lock) | battery: '85' → '84'
+[INFO] AlwaysRefreshDevice Summary - 123 (Front Door Lock) | 2 attributes changed: lock, battery
+```
+
+### Error Handling and Recovery
+- **Hubitat API Errors**: Automatic fallback to event-only updates
+- **MQTT Connection Issues**: Automatic reconnection with exponential backoff
+- **Publish Failures**: Retry logic with configurable attempts and delays
+- **Configuration Errors**: Comprehensive validation at startup
+
+## Performance Optimizations
+
+- **Thread-Safe Device Cache**: High-performance concurrent device data storage
+- **Webhook-First Approach**: Primary updates come from webhooks for efficiency
+- **Selective Refresh**: Only fetches full device data when necessary
+- **Connection Pooling**: Efficient HTTP client management for Hubitat API calls
+- **Async Operations**: Non-blocking operations throughout the application
+- **Memory Efficient**: Proper resource disposal and memory management
+
+## Health Monitoring
+
+The application exposes a health check endpoint at `/health` for monitoring:
+
+```bash
+curl http://localhost:8080/health
+```
 
 ## Project Structure
 
-- **WebhookController.cs**: Handles incoming webhook events from Hubitat
-- **Worker.cs**: Background service for periodic device synchronization
-- **HubitatClient.cs**: Client for communicating with the Hubitat API
-- **Program.cs**: Application startup and service configuration
+- **Controllers/WebhookController.cs**: Handles incoming webhook events from Hubitat with sync coordination
+- **Services/Worker.cs**: Background service for periodic device synchronization
+- **Services/HubitatClient.cs**: Robust HTTP client for Hubitat API communication
+- **Services/DeviceCache.cs**: Thread-safe device data caching
+- **Services/MqttPublishService.cs**: MQTT publishing with retry logic and error handling
+- **Services/SyncCoordinator.cs**: Prevents race conditions between webhook and sync operations
+- **Services/MqttCommandHandler.cs**: Processes MQTT commands to control devices
+- **Common/MqttBuilder.cs**: MQTT client factory with advanced reconnection logic
+- **Program.cs**: Application startup, DI configuration, and validation
 
-## Performance Considerations
+## Configuration Reference
 
-- **Webhook-First Approach**: Primary updates come from webhooks for efficiency
-- **Selective Refresh**: Only fetches full device data when necessary
-- **Device Type Caching**: Remembers device types to optimize decision-making
-- **In-Memory Device Cache**: Stores device data to minimize API calls to Hubitat
-- **Configurable Sync Interval**: Balance between efficiency and reliability
+### Required Settings
+- `Hubitat:BaseUrl` - URL of your Hubitat hub
+- `Hubitat:AccessToken` - Maker API access token
+- `Hubitat:DeviceId` - Maker API app ID
+- `MQTT:Server` - MQTT broker hostname/IP
+- `MQTT:Port` - MQTT broker port
+
+### Optional Settings
+- `Hubitat:FullRefreshEvents` - Comma-separated list of events that trigger full refresh
+- `Hubitat:FullRefreshDeviceTypes` - Comma-separated list of device types that always get full refresh
+- `MQTT:Username/Password` - MQTT authentication credentials
+- `MQTT:BaseTopic` - Base topic prefix (default: "hubitat")
+- `MQTT:MaxRetryAttempts` - Retry attempts for failed publishes (default: 3)
+- `MQTT:RetryDelayMs` - Delay between retries in milliseconds (default: 1000)
+- `MQTT:SyncTimeoutMs` - Timeout for sync operations (default: 10000)
+- `SyncPollIntervalHours` - Hours between full syncs (default: 4, 0 to disable)
+- `ClearTopicOnSync` - Clean up stale topics during sync (default: true)
 
 ## Troubleshooting
 
-- Check logs for connection errors to MQTT broker or Hubitat hub
-- Verify your Hubitat Maker API is accessible from the server running this application
-- Ensure proper webhook configuration in Hubitat
-- Test MQTT connectivity using a client like MQTT Explorer
+### Common Issues
+
+**Configuration Validation Errors**: Check logs during startup for specific validation failures
+
+**MQTT Connection Issues**: 
+- Verify broker accessibility and credentials
+- Check logs for reconnection attempts and exponential backoff behavior
+
+**Webhook Timeout Warnings**:
+- `Timeout acquiring webhook lock` indicates full sync was in progress
+- This is normal behavior that prevents race conditions
+
+**Device Sync Issues**:
+- Check Hubitat API accessibility and token validity
+- Review logs for specific API error messages
+
+### Log Analysis
+- Use log prefixes like `AlwaysRefreshDevice` to filter specific device updates
+- Monitor health check endpoint for overall system status
+- Watch for `HubitatApiException` and `MqttPublishException` for service-specific issues
+
+### Performance Tuning
+- Adjust `SyncPollIntervalHours` based on your needs
+- Configure `MaxRetryAttempts` and `RetryDelayMs` for your network conditions
+- Monitor device cache performance in logs
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please feel free to submit a Pull Request. When contributing:
+
+1. Follow the existing code style and patterns
+2. Add appropriate logging for new features
+3. Include error handling and validation
+4. Update documentation as needed
 
 ## License
 

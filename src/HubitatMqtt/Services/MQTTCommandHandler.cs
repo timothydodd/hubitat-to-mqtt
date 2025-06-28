@@ -74,6 +74,12 @@ namespace HubitatToMqtt
             {
                 var topic = args.ApplicationMessage.Topic;
 
+                // Only process command topics - ignore other device topics
+                if (!topic.Contains("/command/"))
+                {
+                    return; // Silently ignore non-command topics
+                }
+
                 _logger.LogInformation("Received command on topic {Topic}", topic);
 
                 // Extract device ID and command from the topic
