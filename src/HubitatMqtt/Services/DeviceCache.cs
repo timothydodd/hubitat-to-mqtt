@@ -1,130 +1,156 @@
 ﻿using Microsoft.Extensions.Caching.Memory;
+using System.Collections.Concurrent;
 
 namespace HubitatMqtt.Services
 {
     public class DeviceCache
     {
-        private readonly IMemoryCache _cache;
+        private readonly ConcurrentDictionary<string, Device> _devices;
         private readonly ILogger<DeviceCache> _logger;
-        const string CACHE_KEY = "Devices";
+        private readonly ReaderWriterLockSlim _lock;
 
-        public DeviceCache(IMemoryCache cache, ILogger<DeviceCache> logger)
+        public DeviceCache(ILogger<DeviceCache> logger)
         {
-            _cache = cache;
+            _devices = new ConcurrentDictionary<string, Device>();
             _logger = logger;
+            _lock = new ReaderWriterLockSlim();
         }
 
         public void Clear()
         {
-            _cache.Remove(CACHE_KEY);
+            _lock.EnterWriteLock();
+            try
+            {
+                var count = _devices.Count;
+                _devices.Clear();
+                _logger.LogDebug("Cleared {Count} devices from cache", count);
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
         }
 
         public Device? GetDevice(string deviceId)
         {
-            var cacheKey = $"{CACHE_KEY}_{deviceId}";
-            if (_cache.TryGetValue(cacheKey, out Device? device))
+            if (string.IsNullOrWhiteSpace(deviceId))
             {
-                return device;
+                return null;
             }
-            return null;
+
+            _lock.EnterReadLock();
+            try
+            {
+                return _devices.TryGetValue(deviceId, out var device) ? device : null;
+            }
+            finally
+            {
+                _lock.ExitReadLock();
+            }
         }
 
         public List<Device> GetAllDevices()
         {
-            var devices = new List<Device>();
-
-            // We need to scan the cache for all device keys
-            // This is a bit inefficient, but MemoryCache doesn't provide a way to enumerate all keys
-            // In a production app, you might want to maintain a separate list of device IDs
-
-            // Get all cache entries that start with CACHE_KEY
-            var allCacheKeys = GetAllKeysFromCache();
-
-            foreach (var key in allCacheKeys)
+            _lock.EnterReadLock();
+            try
             {
-                if (key.StartsWith(CACHE_KEY) && _cache.TryGetValue(key, out Device? device) && device != null)
-                {
-                    devices.Add(device);
-                }
+                return _devices.Values.ToList();
             }
-
-            return devices;
+            finally
+            {
+                _lock.ExitReadLock();
+            }
         }
 
-        private List<string> GetAllKeysFromCache()
+        public HashSet<string> GetAllDeviceIds()
         {
-            // This is a helper method to get all keys from the MemoryCache
-            // Note: This uses reflection and is not ideal for production use
-            // In a real-world app, you would maintain a separate collection of device IDs
-
-            var keys = new List<string>();
-
-            // Get the entries field via reflection
-            var field = typeof(MemoryCache).GetField("_entries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            if (field != null)
+            _lock.EnterReadLock();
+            try
             {
-                var entriesCollection = field.GetValue(_cache);
-                if (entriesCollection != null)
-                {
-                    // Get the Keys property via reflection
-                    var entriesType = entriesCollection.GetType();
-                    var keysProperty = entriesType.GetProperty("Keys");
-                    if (keysProperty != null)
-                    {
-                        var keysCollection = keysProperty.GetValue(entriesCollection) as System.Collections.ICollection;
-                        if (keysCollection != null)
-                        {
-                            foreach (var key in keysCollection)
-                            {
-                                keys.Add(key.ToString());
-                            }
-                        }
-                    }
-                }
+                return _devices.Keys.ToHashSet();
             }
-
-            return keys;
+            finally
+            {
+                _lock.ExitReadLock();
+            }
         }
 
         public void AddDevice(Device device)
         {
             if (device?.Id == null)
+            {
+                _logger.LogWarning("Attempted to add device with null ID to cache");
                 return;
+            }
 
-            var cacheKey = $"{CACHE_KEY}_{device.Id}";
-            _cache.Set(cacheKey, device);
+            _lock.EnterWriteLock();
+            try
+            {
+                var wasUpdated = _devices.ContainsKey(device.Id);
+                _devices.AddOrUpdate(device.Id, device, (key, existingDevice) => device);
+                
+                _logger.LogDebug("{Action} device {DeviceId} ({DeviceName}) in cache", 
+                    wasUpdated ? "Updated" : "Added", device.Id, device.Label ?? device.Name);
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
         }
 
-        public void UpdateCache(DeviceEvent data)
+        public bool UpdateDeviceAttribute(string deviceId, string attributeName, object? attributeValue)
         {
-            if (data.Content == null)
-                return;
-
-            var cacheKey = $"{CACHE_KEY}_{data.Content.DeviceId}";
-            if (_cache.TryGetValue(cacheKey, out Device? cachedDevice))
+            if (string.IsNullOrWhiteSpace(deviceId) || string.IsNullOrWhiteSpace(attributeName))
             {
-                if (cachedDevice == null)
-                {
-                    return;
-                }
+                _logger.LogWarning("Attempted to update device attribute with invalid parameters: DeviceId={DeviceId}, AttributeName={AttributeName}", 
+                    deviceId, attributeName);
+                return false;
+            }
 
-                if (cachedDevice.Attributes == null)
+            _lock.EnterWriteLock();
+            try
+            {
+                if (_devices.TryGetValue(deviceId, out var cachedDevice))
                 {
-                    cachedDevice.Attributes = new Dictionary<string, object?>();
-                }
+                    if (cachedDevice.Attributes == null)
+                    {
+                        cachedDevice.Attributes = new Dictionary<string, object?>();
+                    }
 
-                if (cachedDevice.Attributes.ContainsKey(data.Content.Name))
-                {
-                    cachedDevice.Attributes[data.Content.Name] = data?.Content?.Value;
+                    cachedDevice.Attributes[attributeName] = attributeValue;
+                    
+                    _logger.LogDebug("Updated attribute {AttributeName}={AttributeValue} for device {DeviceId}", 
+                        attributeName, attributeValue, deviceId);
+                    return true;
                 }
                 else
                 {
-                    cachedDevice.Attributes.Add(data.Content.Name, data?.Content?.Value);
+                    _logger.LogDebug("Device {DeviceId} not found in cache for attribute update", deviceId);
+                    return false;
                 }
-
-                // Update the cache with the modified device
-                _cache.Set(cacheKey, cachedDevice);
             }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+        }
+
+        public int GetDeviceCount()
+        {
+            _lock.EnterReadLock();
+            try
+            {
+                return _devices.Count;
+            }
+            finally
+            {
+                _lock.ExitReadLock();
+            }
+        }
+
+        public void Dispose()
+        {
+            _lock?.Dispose();
         }
     }
 }

@@ -14,6 +14,7 @@ namespace HubitatToMqtt
         private DateTime _lastFullPollTime = DateTime.MinValue;
         private readonly bool _clearTopicOnSync = false;
         private readonly MqttSyncService _mqttSyncService;
+        private readonly SyncCoordinator _syncCoordinator;
 
         public Worker(
             ILogger<Worker> logger,
@@ -22,7 +23,8 @@ namespace HubitatToMqtt
             HubitatClient hubitatClient,
             MqttPublishService mqttPublishService,
             DeviceCache deviceCache,
-            MqttSyncService mqttSyncService)
+            MqttSyncService mqttSyncService,
+            SyncCoordinator syncCoordinator)
         {
             _logger = logger;
             _configuration = configuration;
@@ -32,6 +34,7 @@ namespace HubitatToMqtt
             _deviceCache = deviceCache;
             _clearTopicOnSync = configuration.GetValue<bool>("ClearTopicOnSync", true);
             _mqttSyncService = mqttSyncService;
+            _syncCoordinator = syncCoordinator;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -80,50 +83,124 @@ namespace HubitatToMqtt
         {
             try
             {
-                _logger.LogInformation("Fetching all devices from Hubitat");
+                _logger.LogInformation("Starting full device synchronization");
+
+                // Acquire full sync lock to prevent webhook interference
+                using var syncLock = await _syncCoordinator.AcquireFullSyncLockAsync();
+                
+                _logger.LogInformation("Full sync lock acquired, fetching all devices from Hubitat");
 
                 _deviceCache.Clear();
 
                 // Fetch data from Hubitat API using the HubitatClient
                 var devices = await _hubitatClient.GetAll();
 
-
-                // Publish to MQTT if we have data and are connected
-                if (devices != null && devices.Count > 0 && _mqttClient.IsConnected)
+                // Publish to MQTT if we have data
+                if (devices != null && devices.Count > 0)
                 {
+                    int publishedCount = 0;
+                    int failedCount = 0;
+                    
                     foreach (var device in devices)
                     {
-                        // Update the device cache
-                        if (device.Id != null)
+                        try
                         {
-                            _deviceCache.AddDevice(device);
-                        }
+                            // Update the device cache
+                            if (device.Id != null)
+                            {
+                                _deviceCache.AddDevice(device);
+                            }
 
-                        await _mqttPublishService.PublishDeviceToMqttAsync(device);
+                            await _mqttPublishService.PublishDeviceToMqttAsync(device);
+                            publishedCount++;
+                        }
+                        catch (MqttPublishException ex)
+                        {
+                            _logger.LogError(ex, "Failed to publish device {DeviceId} during full sync", device.Id);
+                            failedCount++;
+                            // Continue with other devices
+                        }
                     }
-                    _lastFullPollTime = DateTime.Now;
+                    
+                    _lastFullPollTime = DateTime.UtcNow;
+                    
                     if (_clearTopicOnSync)
                     {
-
-                        await _mqttSyncService.SyncDevices(devices.Where(x => x.Id != null).Select(x => x.Id!).Distinct().ToHashSet() ?? new HashSet<string>());
+                        try
+                        {
+                            var deviceIds = _deviceCache.GetAllDeviceIds();
+                            await _mqttSyncService.SyncDevices(deviceIds);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Failed to sync MQTT topics during full poll");
+                        }
                     }
 
+                    // Clear pending webhook updates for devices that were successfully synced
+                    var syncedDeviceIds = devices.Where(d => d.Id != null).Select(d => d.Id!).ToHashSet();
+                    _syncCoordinator.ClearPendingWebhookUpdates(syncedDeviceIds);
 
+                    if (failedCount > 0)
+                    {
+                        _logger.LogWarning("Synchronization completed with {PublishedCount} devices published and {FailedCount} failures", publishedCount, failedCount);
+                    }
+                    else
+                    {
+                        _logger.LogInformation("Full synchronization completed successfully for {DeviceCount} devices", devices.Count);
+                    }
 
-                    _logger.LogInformation("Synchronization completed successfully for {DeviceCount} devices", devices.Count);
+                    // Process any devices that had webhook updates during sync
+                    await ProcessPendingWebhookUpdates();
                 }
-                else if (!_mqttClient.IsConnected)
+                else
                 {
-                    _logger.LogWarning("MQTT client not connected. Skipping publish");
+                    _logger.LogWarning("No device data received from Hubitat API");
                 }
-                else if (devices == null || devices.Count == 0)
-                {
-                    _logger.LogWarning("No device data received from Hubitat");
-                }
+            }
+            catch (TimeoutException ex)
+            {
+                _logger.LogError(ex, "Timeout acquiring full sync lock");
+            }
+            catch (HubitatApiException ex)
+            {
+                _logger.LogError(ex, "Hubitat API error occurred while performing full poll");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error occurred while performing full poll");
+                _logger.LogError(ex, "Unexpected error occurred while performing full poll");
+            }
+        }
+
+        private async Task ProcessPendingWebhookUpdates()
+        {
+            var pendingDevices = _syncCoordinator.GetDevicesWithPendingWebhookUpdates();
+            
+            if (pendingDevices.Count > 0)
+            {
+                _logger.LogInformation("Processing {Count} devices with pending webhook updates", pendingDevices.Count);
+                
+                foreach (var deviceId in pendingDevices)
+                {
+                    try
+                    {
+                        // Re-fetch the device to get the latest state
+                        var device = await _hubitatClient.Get(deviceId);
+                        if (device != null)
+                        {
+                            _deviceCache.AddDevice(device);
+                            await _mqttPublishService.PublishDeviceToMqttAsync(device);
+                            _logger.LogDebug("Processed pending webhook update for device {DeviceId}", deviceId);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to process pending webhook update for device {DeviceId}", deviceId);
+                    }
+                }
+                
+                // Clear the processed updates
+                _syncCoordinator.ClearPendingWebhookUpdates(pendingDevices);
             }
         }
     }

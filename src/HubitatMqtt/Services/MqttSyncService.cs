@@ -8,27 +8,31 @@ public class MqttSyncService
 {
     private readonly ILogger<MqttSyncService> _logger;
     private readonly IConfiguration _configuration;
+    private readonly IMqttClient _mqttClient;
     private readonly string _baseTopic;
     public Regex WithAttributeRegex { get; }
     public Regex DeviceOnlyRegex { get; }
     public MqttSyncService(
         ILogger<MqttSyncService> logger,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IMqttClient mqttClient)
     {
         _logger = logger;
         _configuration = configuration;
+        _mqttClient = mqttClient;
         _baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
         WithAttributeRegex = new Regex($"^{_baseTopic}/device/([^/]+)/([^/]+)$", RegexOptions.Compiled);
         DeviceOnlyRegex = new Regex($"^{_baseTopic}/device/([^/]+)$", RegexOptions.Compiled);
     }
     public async Task SyncDevices(HashSet<string> localDeviceCache)
     {
-        using var client = await MqttBuilder.CreateClient(_logger, _configuration);
-        if (!client.IsConnected)
+        if (!_mqttClient.IsConnected)
         {
-            _logger.LogWarning("MQTT client not connected. Skipping publish");
+            _logger.LogWarning("MQTT client not connected. Skipping topic sync");
             return;
         }
+        
+        _logger.LogInformation("Starting MQTT topic synchronization for {DeviceCount} devices", localDeviceCache.Count);
         // Set to store discovered device IDs
         var discoveredDeviceIds = new Dictionary<string, List<string>>();
 
@@ -40,7 +44,7 @@ public class MqttSyncService
             .WithTopicFilter(f => f.WithTopic($"{_baseTopic}/device/#"))
             .Build();
 
-        await client.SubscribeAsync(subscribeOptions);
+        await _mqttClient.SubscribeAsync(subscribeOptions);
 
         Func<MqttApplicationMessageReceivedEventArgs, Task> handler = (args) =>
         {
@@ -67,12 +71,19 @@ public class MqttSyncService
             return Task.CompletedTask;
         };
         // Handle received messages to extract device IDs
-        client.ApplicationMessageReceivedAsync += handler;
+        _mqttClient.ApplicationMessageReceivedAsync += handler;
 
-        // Give some time to collect device IDs (you might need to adjust this)
-        await Task.Delay(10000);
-        client.ApplicationMessageReceivedAsync -= handler;
-        await client.UnsubscribeAsync($"{_baseTopic}/device/#");
+        try
+        {
+            // Give some time to collect device IDs - configurable delay
+            var syncTimeoutMs = _configuration.GetValue("MQTT:SyncTimeoutMs", 10000);
+            await Task.Delay(syncTimeoutMs);
+        }
+        finally
+        {
+            _mqttClient.ApplicationMessageReceivedAsync -= handler;
+            await _mqttClient.UnsubscribeAsync($"{_baseTopic}/device/#");
+        }
         // Find devices to remove (those not in local cache)
         var devicesToRemove = new HashSet<string>(discoveredDeviceIds.Keys);
         devicesToRemove.ExceptWith(localDeviceCache);
@@ -80,25 +91,34 @@ public class MqttSyncService
         // Clear topics for devices that don't exist in cache
         foreach (var deviceId in devicesToRemove)
         {
-            // Clear the device topic by publishing retained empty message
-            await client.PublishAsync(new MqttApplicationMessageBuilder()
-                .WithTopic($"{_baseTopic}/device/{deviceId}")
-                .WithPayload(new byte[0])
-                .WithRetainFlag(true)
-                .Build());
-
-            foreach (var attribute in discoveredDeviceIds[deviceId])
+            try
             {
-                // Clear the attribute topic by publishing retained empty message
-                await client.PublishAsync(new MqttApplicationMessageBuilder()
-                    .WithTopic($"{_baseTopic}/device/{deviceId}/{attribute}")
-                    .WithPayload(new byte[0])
+                // Clear the device topic by publishing retained empty message
+                await _mqttClient.PublishAsync(new MqttApplicationMessageBuilder()
+                    .WithTopic($"{_baseTopic}/device/{deviceId}")
+                    .WithPayload(Array.Empty<byte>())
                     .WithRetainFlag(true)
                     .Build());
+
+                foreach (var attribute in discoveredDeviceIds[deviceId])
+                {
+                    // Clear the attribute topic by publishing retained empty message
+                    await _mqttClient.PublishAsync(new MqttApplicationMessageBuilder()
+                        .WithTopic($"{_baseTopic}/device/{deviceId}/{attribute}")
+                        .WithPayload(Array.Empty<byte>())
+                        .WithRetainFlag(true)
+                        .Build());
+                }
+                
+                _logger.LogDebug("Cleared topics for removed device: {DeviceId}", deviceId);
             }
-            Console.WriteLine($"Cleared topics for device: {deviceId}");
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to clear topics for device {DeviceId}", deviceId);
+            }
         }
-        await client.DisconnectAsync();
+        
+        _logger.LogInformation("MQTT topic synchronization completed. Cleared {RemovedCount} removed devices", devicesToRemove.Count);
     }
     private DeviceMessage? ExtractData(string topic)
     {
