@@ -146,6 +146,9 @@ namespace HubitatToMqtt
                     // Clear pending webhook updates for devices that were successfully synced
                     var syncedDeviceIds = devices.Where(d => d.Id != null).Select(d => d.Id!).ToHashSet();
                     _syncCoordinator.ClearPendingWebhookUpdates(syncedDeviceIds);
+                    
+                    // Cleanup unused device locks to prevent memory leaks
+                    _syncCoordinator.CleanupUnusedDeviceLocks(syncedDeviceIds);
 
                     if (failedCount > 0)
                     {

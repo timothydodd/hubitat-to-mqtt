@@ -5,52 +5,54 @@ namespace HubitatMqtt.Services
     /// <summary>
     /// Coordinates between webhook updates and periodic sync to prevent race conditions
     /// </summary>
-    public class SyncCoordinator
+    public class SyncCoordinator : IDisposable
     {
         private readonly ILogger<SyncCoordinator> _logger;
-        private readonly SemaphoreSlim _syncSemaphore;
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _deviceLocks;
+        private readonly SemaphoreSlim _fullSyncSemaphore;
         private readonly ConcurrentDictionary<string, DateTime> _pendingWebhookUpdates;
-        private bool _fullSyncInProgress;
+        private volatile bool _fullSyncInProgress;
         private DateTime _lastFullSync;
 
         public SyncCoordinator(ILogger<SyncCoordinator> logger)
         {
             _logger = logger;
-            _syncSemaphore = new SemaphoreSlim(1, 1);
+            _deviceLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
+            _fullSyncSemaphore = new SemaphoreSlim(1, 1);
             _pendingWebhookUpdates = new ConcurrentDictionary<string, DateTime>();
             _fullSyncInProgress = false;
             _lastFullSync = DateTime.MinValue;
         }
 
         /// <summary>
-        /// Acquires a lock for webhook processing, preventing conflicts with full sync
+        /// Acquires a lock for webhook processing. Uses per-device locking for better concurrency.
         /// </summary>
         public async Task<IDisposable> AcquireWebhookLockAsync(string deviceId, TimeSpan timeout = default)
         {
             if (timeout == default)
-                timeout = TimeSpan.FromSeconds(5);
+                timeout = TimeSpan.FromSeconds(2); // Reduced timeout since we're using per-device locks
 
-            if (!await _syncSemaphore.WaitAsync(timeout))
+            // If full sync is in progress, defer webhook updates
+            if (_fullSyncInProgress)
+            {
+                _logger.LogDebug("Full sync in progress, deferring webhook update for device {DeviceId}", deviceId);
+                _pendingWebhookUpdates.TryAdd(deviceId, DateTime.UtcNow);
+                throw new InvalidOperationException("Full sync in progress, webhook update deferred");
+            }
+
+            // Get or create device-specific semaphore
+            var deviceSemaphore = _deviceLocks.GetOrAdd(deviceId, _ => new SemaphoreSlim(1, 1));
+
+            if (!await deviceSemaphore.WaitAsync(timeout))
             {
                 _logger.LogWarning("Timeout waiting for webhook lock for device {DeviceId}", deviceId);
                 throw new TimeoutException($"Failed to acquire webhook lock for device {deviceId} within {timeout}");
             }
 
-            if (_fullSyncInProgress)
-            {
-                _logger.LogDebug("Full sync in progress, deferring webhook update for device {DeviceId}", deviceId);
-                _syncSemaphore.Release();
-                
-                // Record this webhook update as pending
-                _pendingWebhookUpdates.TryAdd(deviceId, DateTime.UtcNow);
-                
-                throw new InvalidOperationException("Full sync in progress, webhook update deferred");
-            }
-
             // Mark this device as having a pending webhook update
             _pendingWebhookUpdates.TryAdd(deviceId, DateTime.UtcNow);
 
-            return new WebhookLockReleaser(this, deviceId);
+            return new WebhookLockReleaser(this, deviceId, deviceSemaphore);
         }
 
         /// <summary>
@@ -61,7 +63,7 @@ namespace HubitatMqtt.Services
             if (timeout == default)
                 timeout = TimeSpan.FromSeconds(30);
 
-            if (!await _syncSemaphore.WaitAsync(timeout))
+            if (!await _fullSyncSemaphore.WaitAsync(timeout))
             {
                 _logger.LogWarning("Timeout waiting for full sync lock");
                 throw new TimeoutException($"Failed to acquire full sync lock within {timeout}");
@@ -105,10 +107,10 @@ namespace HubitatMqtt.Services
             _logger.LogDebug("Cleared pending webhook updates for {Count} devices", syncedDeviceIds.Count);
         }
 
-        private void ReleaseWebhookLock(string deviceId)
+        private void ReleaseWebhookLock(string deviceId, SemaphoreSlim deviceSemaphore)
         {
             _logger.LogDebug("Released webhook lock for device {DeviceId}", deviceId);
-            _syncSemaphore.Release();
+            deviceSemaphore.Release();
         }
 
         private void ReleaseFullSyncLock()
@@ -116,29 +118,77 @@ namespace HubitatMqtt.Services
             _fullSyncInProgress = false;
             _lastFullSync = DateTime.UtcNow;
             _logger.LogDebug("Released full sync lock");
-            _syncSemaphore.Release();
+            _fullSyncSemaphore.Release();
         }
 
         public bool IsFullSyncInProgress => _fullSyncInProgress;
         public DateTime LastFullSync => _lastFullSync;
 
+        /// <summary>
+        /// Cleanup unused device locks to prevent memory leaks
+        /// </summary>
+        public void CleanupUnusedDeviceLocks(HashSet<string> activeDeviceIds)
+        {
+            var locksToRemove = new List<string>();
+            
+            foreach (var kvp in _deviceLocks)
+            {
+                var deviceId = kvp.Key;
+                var semaphore = kvp.Value;
+                
+                // If device is not active and semaphore is not in use, remove it
+                if (!activeDeviceIds.Contains(deviceId) && semaphore.CurrentCount == 1)
+                {
+                    locksToRemove.Add(deviceId);
+                }
+            }
+            
+            foreach (var deviceId in locksToRemove)
+            {
+                if (_deviceLocks.TryRemove(deviceId, out var removedSemaphore))
+                {
+                    removedSemaphore.Dispose();
+                    _logger.LogDebug("Cleaned up unused device lock for {DeviceId}", deviceId);
+                }
+            }
+            
+            if (locksToRemove.Count > 0)
+            {
+                _logger.LogDebug("Cleaned up {Count} unused device locks", locksToRemove.Count);
+            }
+        }
+
+        public void Dispose()
+        {
+            _fullSyncSemaphore?.Dispose();
+            
+            foreach (var kvp in _deviceLocks)
+            {
+                kvp.Value.Dispose();
+            }
+            
+            _deviceLocks.Clear();
+        }
+
         private class WebhookLockReleaser : IDisposable
         {
             private readonly SyncCoordinator _coordinator;
             private readonly string _deviceId;
+            private readonly SemaphoreSlim _deviceSemaphore;
             private bool _disposed;
 
-            public WebhookLockReleaser(SyncCoordinator coordinator, string deviceId)
+            public WebhookLockReleaser(SyncCoordinator coordinator, string deviceId, SemaphoreSlim deviceSemaphore)
             {
                 _coordinator = coordinator;
                 _deviceId = deviceId;
+                _deviceSemaphore = deviceSemaphore;
             }
 
             public void Dispose()
             {
                 if (!_disposed)
                 {
-                    _coordinator.ReleaseWebhookLock(_deviceId);
+                    _coordinator.ReleaseWebhookLock(_deviceId, _deviceSemaphore);
                     _disposed = true;
                 }
             }
