@@ -8,6 +8,54 @@ public class MqttBuilder
     private static int _reconnectAttempts = 0;
     private static readonly object _reconnectLock = new object();
     private static DateTime _lastReconnectAttempt = DateTime.MinValue;
+    public static IMqttClient CreateClientWithoutConnection(ILogger logger, IConfiguration configuration)
+    {
+        var mqttFactory = new MqttClientFactory();
+        var mqttClient = mqttFactory.CreateMqttClient();
+
+        // Configure MQTT client connection options
+        var optionsBuilder = new MqttClientOptionsBuilder()
+            .WithClientId($"HubitatWorker_{Guid.NewGuid()}")
+            .WithTcpServer(
+                configuration["MQTT:Server"],
+                configuration.GetValue<int>("MQTT:Port", 1883))
+            .WithCleanSession();
+
+        // Only add credentials if both username and password are provided
+        if (!string.IsNullOrEmpty(configuration["MQTT:Username"]) &&
+            !string.IsNullOrEmpty(configuration["MQTT:Password"]))
+        {
+            optionsBuilder = optionsBuilder.WithCredentials(
+                configuration["MQTT:Username"],
+                configuration["MQTT:Password"]);
+        }
+
+        var options = optionsBuilder.Build();
+
+        // Setup reconnection handler with exponential backoff
+        mqttClient.DisconnectedAsync += async (e) =>
+        {
+            await HandleReconnectionAsync(mqttClient, options, logger, e);
+        };
+
+        mqttClient.ConnectedAsync += (e) =>
+        {
+            // Reset reconnection attempts on successful connection
+            lock (_reconnectLock)
+            {
+                _reconnectAttempts = 0;
+            }
+            logger.LogInformation("Connected to MQTT broker successfully");
+            return Task.CompletedTask;
+        };
+
+        // Store connection task for later use - we'll trigger this in background services
+        var connectionTask = ConnectClientAsync(mqttClient, options, logger);
+        Task.Run(async () => await connectionTask);
+
+        return mqttClient;
+    }
+
     public static async Task<IMqttClient> CreateClient(ILogger logger, IConfiguration configuration, bool shortLived = true)
     {
 
@@ -135,6 +183,19 @@ public class MqttBuilder
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to reconnect to MQTT broker on attempt {Attempt}", currentAttempt);
+        }
+    }
+    
+    private static async Task ConnectClientAsync(IMqttClient mqttClient, MqttClientOptions options, ILogger logger)
+    {
+        try
+        {
+            await mqttClient.ConnectAsync(options);
+            logger.LogInformation("Successfully connected to MQTT broker");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to connect to MQTT broker during initialization. Will retry automatically.");
         }
     }
 }

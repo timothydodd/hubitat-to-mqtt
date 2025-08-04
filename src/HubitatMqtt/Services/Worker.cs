@@ -53,8 +53,14 @@ namespace HubitatToMqtt
                         await PerformFullPollAsync();
                     }
 
-                    // Sleep for a minute before checking again
+                    // Sleep for 2 minutes before checking again
                     await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
+                    
+                    // Suggest garbage collection after long idle periods to optimize memory
+                    if (DateTime.UtcNow - _lastFullPollTime > TimeSpan.FromMinutes(30))
+                    {
+                        GC.Collect(0, GCCollectionMode.Optimized);
+                    }
                 }
                 catch (Exception ex)
                 {

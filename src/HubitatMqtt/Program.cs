@@ -3,6 +3,9 @@ using HubitatMqtt.Services;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Http.Resilience;
+using MQTTnet;
+using Polly;
 
 namespace HubitatToMqtt
 {
@@ -39,17 +42,45 @@ namespace HubitatToMqtt
 
             builder.Services.AddHttpClient<HubitatClient>((serviceProvider, client) =>
             {
-                // Configure HttpClient timeout and other settings if needed
+                // Configure HttpClient with optimized settings
                 client.Timeout = TimeSpan.FromSeconds(30);
+                client.DefaultRequestHeaders.ConnectionClose = false; // Enable connection reuse
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler()
+            {
+                // Optimize connection pooling
+                MaxConnectionsPerServer = 10,
+                UseCookies = false, // Not needed for API calls
+                UseDefaultCredentials = false
+            })
+            .AddStandardResilienceHandler(options =>
+            {
+                // Configure retry policy
+                options.Retry.MaxRetryAttempts = 3;
+                options.Retry.BackoffType = DelayBackoffType.Exponential;
+                options.Retry.Delay = TimeSpan.FromSeconds(1);
+                
+                // Configure circuit breaker
+                options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(30);
+                options.CircuitBreaker.FailureRatio = 0.5; // 50% failure rate
+                options.CircuitBreaker.MinimumThroughput = 5;
+                options.CircuitBreaker.BreakDuration = TimeSpan.FromSeconds(30);
+                
+                // Configure timeout
+                options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
+                options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(30);
             });
             builder.Services.AddSingleton<DeviceCache>();
             builder.Services.AddSingleton<MqttSyncService>();
             builder.Services.AddSingleton<SyncCoordinator>();
-            // Register MQTT client as a singleton so it can be shared
-            builder.Services.AddSingleton(serviceProvider =>
+            // Register MQTT client using factory pattern to avoid blocking startup
+            builder.Services.AddSingleton<IMqttClient>(serviceProvider =>
             {
-                return MqttBuilder.CreateClient(serviceProvider.GetRequiredService<ILogger<Program>>(), serviceProvider.GetRequiredService<IConfiguration>(), false).Result;
-
+                var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
+                var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+                
+                // Create client without connecting - connection happens in background services
+                return MqttBuilder.CreateClientWithoutConnection(logger, configuration);
             });
 
             builder.Services.AddLogging(logging =>
