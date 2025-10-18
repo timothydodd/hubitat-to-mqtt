@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <LangVersion>11</LangVersion>
+    <LangVersion>12</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>137de04f-0ea5-4e20-87c0-78f2cf50a3b1</UserSecretsId>
   </PropertyGroup>

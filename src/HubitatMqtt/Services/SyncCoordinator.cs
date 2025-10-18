@@ -70,7 +70,7 @@ namespace HubitatMqtt.Services
             }
 
             _fullSyncInProgress = true;
-            _logger.LogDebug("Full sync lock acquired");
+            _logger.LogTrace("Full sync lock acquired");
 
             return new FullSyncLockReleaser(this);
         }
@@ -109,7 +109,7 @@ namespace HubitatMqtt.Services
 
         private void ReleaseWebhookLock(string deviceId, SemaphoreSlim deviceSemaphore)
         {
-            _logger.LogDebug("Released webhook lock for device {DeviceId}", deviceId);
+            _logger.LogTrace("Released webhook lock for device {DeviceId}", deviceId);
             deviceSemaphore.Release();
         }
 
@@ -117,7 +117,7 @@ namespace HubitatMqtt.Services
         {
             _fullSyncInProgress = false;
             _lastFullSync = DateTime.UtcNow;
-            _logger.LogDebug("Released full sync lock");
+            _logger.LogTrace("Released full sync lock");
             _fullSyncSemaphore.Release();
         }
 
@@ -148,7 +148,7 @@ namespace HubitatMqtt.Services
                 if (_deviceLocks.TryRemove(deviceId, out var removedSemaphore))
                 {
                     removedSemaphore.Dispose();
-                    _logger.LogDebug("Cleaned up unused device lock for {DeviceId}", deviceId);
+                    _logger.LogTrace("Cleaned up unused device lock for {DeviceId}", deviceId);
                 }
             }
             

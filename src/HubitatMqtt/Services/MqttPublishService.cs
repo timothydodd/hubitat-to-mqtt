@@ -14,6 +14,7 @@ namespace HubitatToMqtt
         private readonly IConfiguration _configuration;
         private readonly int _maxRetryAttempts;
         private readonly TimeSpan _retryDelay;
+        private static readonly char[] InvalidTopicChars = [' ', '/', '+', '#', '\t', '\n', '\r'];
 
         public MqttPublishService(
             ILogger<MqttPublishService> logger,
@@ -26,6 +27,108 @@ namespace HubitatToMqtt
             _maxRetryAttempts = configuration.GetValue("MQTT:MaxRetryAttempts", 3);
             _retryDelay = TimeSpan.FromMilliseconds(configuration.GetValue("MQTT:RetryDelayMs", 1000));
         }
+        /// <summary>
+        /// Publishes multiple devices to MQTT in batches for improved performance
+        /// </summary>
+        public async Task PublishDevicesBatchAsync(IEnumerable<Device> devices, int batchSize = 50)
+        {
+            if (!await EnsureConnectedAsync())
+            {
+                _logger.LogWarning("MQTT client not connected. Skipping batch publish");
+                return;
+            }
+
+            var deviceList = devices.ToList();
+            var totalDevices = deviceList.Count;
+            var publishedCount = 0;
+            var failedCount = 0;
+
+            // Process devices in batches
+            for (int i = 0; i < totalDevices; i += batchSize)
+            {
+                var batch = deviceList.Skip(i).Take(batchSize);
+                var messages = new List<MqttApplicationMessage>();
+
+                foreach (var device in batch)
+                {
+                    if (device == null || string.IsNullOrEmpty(device.Id))
+                    {
+                        failedCount++;
+                        continue;
+                    }
+
+                    try
+                    {
+                        // Build device message
+                        var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
+                        var idTopic = $"{baseTopic}/device/{device.Id}";
+                        var deviceJson = JsonSerializer.Serialize(device, Constants.JsonOptions);
+
+                        messages.Add(new MqttApplicationMessageBuilder()
+                            .WithTopic(idTopic)
+                            .WithPayload(deviceJson)
+                            .WithRetainFlag(true)
+                            .Build());
+
+                        // Build attribute messages
+                        if (device.Attributes != null)
+                        {
+                            foreach (var attr in device.Attributes)
+                            {
+                                if (attr.Value == null)
+                                    continue;
+
+                                string valueString;
+                                var attrType = attr.Value.GetType();
+                                if (attrType == typeof(string) || attrType.IsValueType)
+                                {
+                                    valueString = attr.Value.ToString() ?? "";
+                                }
+                                else
+                                {
+                                    valueString = JsonSerializer.Serialize(attr.Value, Constants.JsonOptions);
+                                }
+
+                                var idAttributeTopic = $"{baseTopic}/device/{device.Id}/{SanitizeTopicName(attr.Key)}";
+                                messages.Add(new MqttApplicationMessageBuilder()
+                                    .WithTopic(idAttributeTopic)
+                                    .WithPayload(valueString)
+                                    .WithRetainFlag(true)
+                                    .Build());
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to build messages for device {DeviceId}", device.Id);
+                        failedCount++;
+                    }
+                }
+
+                // Publish batch
+                if (messages.Count > 0)
+                {
+                    try
+                    {
+                        foreach (var message in messages)
+                        {
+                            await PublishWithRetryAsync(message, $"batch message to {message.Topic}");
+                        }
+                        publishedCount += messages.Count;
+                        _logger.LogTrace("Published batch of {MessageCount} messages", messages.Count);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to publish batch");
+                        failedCount += messages.Count;
+                    }
+                }
+            }
+
+            _logger.LogDebug("Batch publish completed: {PublishedCount} messages published, {FailedCount} failed",
+                publishedCount, failedCount);
+        }
+
         /// <summary>
         /// Publishes a full device to MQTT topics
         /// </summary>
@@ -218,7 +321,7 @@ namespace HubitatToMqtt
         }
 
         /// <summary>
-        /// Sanitizes a name for use in MQTT topics
+        /// Sanitizes a name for use in MQTT topics (optimized for performance)
         /// </summary>
         public string SanitizeTopicName(string name)
         {
@@ -227,14 +330,24 @@ namespace HubitatToMqtt
                 return "unknown";
             }
 
-            // Replace spaces, special chars, etc. to make a valid MQTT topic
-            return name.Replace(" ", "_")
-                .Replace("/", "_")
-                .Replace("+", "_")
-                .Replace("#", "_")
-                .Replace("\t", "_")
-                .Replace("\n", "_")
-                .Replace("\r", "_");
+            // Check if sanitization is needed
+            if (name.IndexOfAny(InvalidTopicChars) == -1)
+            {
+                return name;
+            }
+
+            // Efficiently replace invalid characters using string.Create
+            return string.Create(name.Length, name, static (span, original) =>
+            {
+                original.AsSpan().CopyTo(span);
+                for (int i = 0; i < span.Length; i++)
+                {
+                    if (Array.IndexOf(InvalidTopicChars, span[i]) >= 0)
+                    {
+                        span[i] = '_';
+                    }
+                }
+            });
         }
     }
 

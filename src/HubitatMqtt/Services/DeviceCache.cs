@@ -51,8 +51,8 @@ namespace HubitatMqtt.Services
 
             var wasUpdated = _devices.ContainsKey(device.Id);
             _devices.AddOrUpdate(device.Id, device, (key, existingDevice) => device);
-            
-            _logger.LogDebug("{Action} device {DeviceId} ({DeviceName}) in cache", 
+
+            _logger.LogTrace("{Action} device {DeviceId} ({DeviceName}) in cache",
                 wasUpdated ? "Updated" : "Added", device.Id, device.Label ?? device.Name);
         }
 
@@ -73,8 +73,8 @@ namespace HubitatMqtt.Services
                 }
 
                 cachedDevice.Attributes[attributeName] = attributeValue;
-                
-                _logger.LogDebug("Updated attribute {AttributeName}={AttributeValue} for device {DeviceId}", 
+
+                _logger.LogTrace("Updated attribute {AttributeName}={AttributeValue} for device {DeviceId}",
                     attributeName, attributeValue, deviceId);
                 return true;
             }

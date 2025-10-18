@@ -4,14 +4,19 @@ using MQTTnet;
 
 namespace HubitatMqtt.Services;
 
-public class MqttSyncService
+public partial class MqttSyncService
 {
     private readonly ILogger<MqttSyncService> _logger;
     private readonly IConfiguration _configuration;
     private readonly IMqttClient _mqttClient;
     private readonly string _baseTopic;
-    public Regex WithAttributeRegex { get; }
-    public Regex DeviceOnlyRegex { get; }
+
+    // Regex source generators for performance
+    [GeneratedRegex(@"^hubitat/device/([^/]+)/([^/]+)$", RegexOptions.Compiled)]
+    private static partial Regex WithAttributePattern();
+
+    [GeneratedRegex(@"^hubitat/device/([^/]+)$", RegexOptions.Compiled)]
+    private static partial Regex DeviceOnlyPattern();
     public MqttSyncService(
         ILogger<MqttSyncService> logger,
         IConfiguration configuration,
@@ -21,8 +26,6 @@ public class MqttSyncService
         _configuration = configuration;
         _mqttClient = mqttClient;
         _baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
-        WithAttributeRegex = new Regex($"^{_baseTopic}/device/([^/]+)/([^/]+)$", RegexOptions.Compiled);
-        DeviceOnlyRegex = new Regex($"^{_baseTopic}/device/([^/]+)$", RegexOptions.Compiled);
     }
     public async Task SyncDevices(HashSet<string> localDeviceCache)
     {
@@ -35,9 +38,8 @@ public class MqttSyncService
         _logger.LogInformation("Starting MQTT topic synchronization for {DeviceCount} devices", localDeviceCache.Count);
         // Set to store discovered device IDs
         var discoveredDeviceIds = new Dictionary<string, List<string>>();
-
-        // Create regex pattern to extract device ID from topics
-        var topicPattern = new Regex($"^{_baseTopic}/device/([^/]+)/.*$");
+        var lastMessageTime = DateTime.UtcNow;
+        var messageLock = new object();
 
         // Subscribe to all device topics
         var subscribeOptions = new MqttClientSubscribeOptionsBuilder()
@@ -58,26 +60,53 @@ public class MqttSyncService
                 return Task.CompletedTask;
             }
 
-            if (!discoveredDeviceIds.ContainsKey(deviceMessage.DeviceId))
+            lock (messageLock)
             {
-                discoveredDeviceIds.Add(deviceMessage.DeviceId, new List<string>());
-            }
+                if (!discoveredDeviceIds.ContainsKey(deviceMessage.DeviceId))
+                {
+                    discoveredDeviceIds.Add(deviceMessage.DeviceId, new List<string>());
+                }
 
-            if (!string.IsNullOrWhiteSpace(deviceMessage.AttributeName))
-            {
-                discoveredDeviceIds[deviceMessage.DeviceId].Add(deviceMessage.AttributeName);
+                if (!string.IsNullOrWhiteSpace(deviceMessage.AttributeName))
+                {
+                    discoveredDeviceIds[deviceMessage.DeviceId].Add(deviceMessage.AttributeName);
+                }
+
+                lastMessageTime = DateTime.UtcNow;
             }
 
             return Task.CompletedTask;
         };
+
         // Handle received messages to extract device IDs
         _mqttClient.ApplicationMessageReceivedAsync += handler;
 
         try
         {
-            // Give some time to collect device IDs - configurable delay
-            var syncTimeoutMs = _configuration.GetValue("MQTT:SyncTimeoutMs", 10000);
-            await Task.Delay(syncTimeoutMs);
+            // Intelligent timeout: wait for message inactivity
+            var maxTotalWait = TimeSpan.FromMilliseconds(_configuration.GetValue("MQTT:SyncTimeoutMs", 10000));
+            var inactivityThreshold = TimeSpan.FromMilliseconds(_configuration.GetValue("MQTT:SyncInactivityMs", 500));
+            var checkInterval = TimeSpan.FromMilliseconds(50);
+            var startTime = DateTime.UtcNow;
+
+            while (DateTime.UtcNow - startTime < maxTotalWait)
+            {
+                await Task.Delay(checkInterval);
+
+                DateTime lastMsg;
+                lock (messageLock)
+                {
+                    lastMsg = lastMessageTime;
+                }
+
+                // If no messages for the inactivity threshold, we're done
+                if (DateTime.UtcNow - lastMsg > inactivityThreshold)
+                {
+                    _logger.LogDebug("Topic discovery completed after {Duration}ms of inactivity",
+                        (DateTime.UtcNow - startTime).TotalMilliseconds);
+                    break;
+                }
+            }
         }
         finally
         {
@@ -122,7 +151,7 @@ public class MqttSyncService
     }
     private DeviceMessage? ExtractData(string topic)
     {
-        var withAttributeMatch = WithAttributeRegex.Match(topic);
+        var withAttributeMatch = WithAttributePattern().Match(topic);
         if (withAttributeMatch.Success)
         {
             var deviceId = withAttributeMatch.Groups[1].Value;
@@ -134,7 +163,7 @@ public class MqttSyncService
             };
         }
 
-        var deviceOnlyMatch = DeviceOnlyRegex.Match(topic);
+        var deviceOnlyMatch = DeviceOnlyPattern().Match(topic);
         if (deviceOnlyMatch.Success)
         {
             var deviceId = deviceOnlyMatch.Groups[1].Value;

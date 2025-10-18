@@ -3,13 +3,20 @@ using MQTTnet;
 
 namespace HubitatToMqtt
 {
-    public class MqttCommandHandler : IHostedService
+    public partial class MqttCommandHandler : IHostedService
     {
         private readonly ILogger<MqttCommandHandler> _logger;
         private readonly IConfiguration _configuration;
         private readonly IMqttClient _mqttClient;
         private readonly HubitatClient _hubitatClient;
         private readonly string baseTopic;
+
+        // Regex source generators for performance
+        [GeneratedRegex(@"^hubitat/device/([^/]+)/command/([^/]+)(/([^/]+))?$", RegexOptions.Compiled)]
+        private static partial Regex DeviceCommandRegex();
+
+        [GeneratedRegex(@"^hubitat/([^/]+)/command/([^/]+)$", RegexOptions.Compiled)]
+        private static partial Regex NamedDeviceCommandRegex();
         public MqttCommandHandler(
             ILogger<MqttCommandHandler> logger,
             IConfiguration configuration,
@@ -80,7 +87,7 @@ namespace HubitatToMqtt
                     return; // Silently ignore non-command topics
                 }
 
-                _logger.LogInformation("Received command on topic {Topic}", topic);
+                _logger.LogDebug("Received command on topic {Topic}", topic);
 
                 // Extract device ID and command from the topic
                 var deviceId = ExtractDeviceId(topic);
@@ -103,64 +110,49 @@ namespace HubitatToMqtt
 
         private string? ExtractDeviceId(string topic)
         {
-            var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
-
-            // Match topic pattern for direct device ID: hubitat/device/{deviceId}/command/{command}
-            var directIdPattern = $"^{baseTopic}/device/([^/]+)/command/[^/]+$";
-            var directMatch = Regex.Match(topic, directIdPattern);
-
+            // Match topic pattern for direct device ID: hubitat/device/{deviceId}/command/{command}[/{value}]
+            var directMatch = DeviceCommandRegex().Match(topic);
             if (directMatch.Success && directMatch.Groups.Count > 1)
             {
                 return directMatch.Groups[1].Value;
             }
 
             // If no direct match, we need to look up the device by name
-            var namedPattern = $"^{baseTopic}/([^/]+)/command/[^/]+$";
-            var namedMatch = Regex.Match(topic, namedPattern);
-
+            var namedMatch = NamedDeviceCommandRegex().Match(topic);
             if (namedMatch.Success && namedMatch.Groups.Count > 1)
             {
                 var deviceName = namedMatch.Groups[1].Value;
                 return ResolveDeviceIdFromName(deviceName);
             }
-            var directIdPattern2 = $"^{baseTopic}/device/([^/]+)/command/([^/]+)(/([^/]+))?$";
-            var directMatch2 = Regex.Match(topic, directIdPattern2);
-            if (directMatch2.Success && directMatch2.Groups.Count > 1)
-            {
-                return directMatch2.Groups[1].Value;
-            }
+
             return null;
         }
 
         private string? ExtractCommand(string topic)
         {
-            var baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
-
-            // Match command pattern: .../command/{command}
-            var commandPattern = $"^{baseTopic}/.+/command/([^/]+)$";
-            var match = Regex.Match(topic, commandPattern);
-
-            if (match.Success && match.Groups.Count > 1)
+            // Try device command pattern first
+            var directMatch = DeviceCommandRegex().Match(topic);
+            if (directMatch.Success && directMatch.Groups.Count > 2)
             {
-                return match.Groups[1].Value;
+                return directMatch.Groups[2].Value;
             }
 
-            var directIdPattern2 = $"^{baseTopic}/device/([^/]+)/command/([^/]+)(/([^/]+))?$";
-            var directMatch2 = Regex.Match(topic, directIdPattern2);
-            if (directMatch2.Success && directMatch2.Groups.Count > 2)
+            // Try named device pattern
+            var namedMatch = NamedDeviceCommandRegex().Match(topic);
+            if (namedMatch.Success && namedMatch.Groups.Count > 2)
             {
-                return directMatch2.Groups[2].Value;
+                return namedMatch.Groups[2].Value;
             }
+
             return null;
         }
         private string? ExtractValue(string topic)
         {
-
-            var directIdPattern2 = $"^{baseTopic}/device/([^/]+)/command/([^/]+)(/([^/]+))?$";
-            var directMatch2 = Regex.Match(topic, directIdPattern2);
-            if (directMatch2.Success && directMatch2.Groups.Count > 4)
+            // Extract optional value from hubitat/device/{id}/command/{cmd}/{value}
+            var directMatch = DeviceCommandRegex().Match(topic);
+            if (directMatch.Success && directMatch.Groups.Count > 4 && directMatch.Groups[4].Success)
             {
-                return directMatch2.Groups[4].Value;
+                return directMatch.Groups[4].Value;
             }
             return null;
         }
@@ -188,7 +180,7 @@ namespace HubitatToMqtt
         {
             try
             {
-                _logger.LogInformation("Sending command to Hubitat - Device: {DeviceId}, Command: {Command}, Value: {Value}",
+                _logger.LogDebug("Sending command to Hubitat - Device: {DeviceId}, Command: {Command}, Value: {Value}",
                     deviceId, command, value);
 
                 await _hubitatClient.SendCommand(deviceId, command, value);
@@ -202,7 +194,7 @@ namespace HubitatToMqtt
                     // You would implement this by calling your existing publish method
                     // This would require refactoring your PublishDeviceToMqttAsync method to be accessible
 
-                    _logger.LogInformation("Updated device state after command execution");
+                    _logger.LogDebug("Updated device state after command execution");
                 }
             }
             catch (Exception ex)

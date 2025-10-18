@@ -55,12 +55,6 @@ namespace HubitatToMqtt
 
                     // Sleep for 2 minutes before checking again
                     await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
-                    
-                    // Suggest garbage collection after long idle periods to optimize memory
-                    if (DateTime.UtcNow - _lastFullPollTime > TimeSpan.FromMinutes(30))
-                    {
-                        GC.Collect(0, GCCollectionMode.Optimized);
-                    }
                 }
                 catch (Exception ex)
                 {
@@ -93,8 +87,8 @@ namespace HubitatToMqtt
 
                 // Acquire full sync lock to prevent webhook interference
                 using var syncLock = await _syncCoordinator.AcquireFullSyncLockAsync();
-                
-                _logger.LogInformation("Full sync lock acquired, fetching all devices from Hubitat");
+
+                _logger.LogDebug("Full sync lock acquired, fetching all devices from Hubitat");
 
                 _deviceCache.Clear();
 
@@ -104,30 +98,25 @@ namespace HubitatToMqtt
                 // Publish to MQTT if we have data
                 if (devices != null && devices.Count > 0)
                 {
-                    int publishedCount = 0;
-                    int failedCount = 0;
-                    
+                    // Update device cache first
                     foreach (var device in devices)
                     {
-                        try
+                        if (device.Id != null)
                         {
-                            // Update the device cache
-                            if (device.Id != null)
-                            {
-                                _deviceCache.AddDevice(device);
-                            }
-
-                            await _mqttPublishService.PublishDeviceToMqttAsync(device);
-                            publishedCount++;
-                        }
-                        catch (MqttPublishException ex)
-                        {
-                            _logger.LogError(ex, "Failed to publish device {DeviceId} during full sync", device.Id);
-                            failedCount++;
-                            // Continue with other devices
+                            _deviceCache.AddDevice(device);
                         }
                     }
-                    
+
+                    // Use batch publishing for better performance
+                    try
+                    {
+                        await _mqttPublishService.PublishDevicesBatchAsync(devices);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to batch publish devices during full sync");
+                    }
+
                     _lastFullPollTime = DateTime.UtcNow;
                     
                     if (_clearTopicOnSync)
@@ -150,14 +139,7 @@ namespace HubitatToMqtt
                     // Cleanup unused device locks to prevent memory leaks
                     _syncCoordinator.CleanupUnusedDeviceLocks(syncedDeviceIds);
 
-                    if (failedCount > 0)
-                    {
-                        _logger.LogWarning("Synchronization completed with {PublishedCount} devices published and {FailedCount} failures", publishedCount, failedCount);
-                    }
-                    else
-                    {
-                        _logger.LogInformation("Full synchronization completed successfully for {DeviceCount} devices", devices.Count);
-                    }
+                    _logger.LogInformation("Full synchronization completed successfully for {DeviceCount} devices", devices.Count);
 
                     // Process any devices that had webhook updates during sync
                     await ProcessPendingWebhookUpdates();

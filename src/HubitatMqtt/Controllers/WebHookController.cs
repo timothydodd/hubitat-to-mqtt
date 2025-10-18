@@ -210,7 +210,7 @@ public class WebhookController : ControllerBase
         var triggerAttribute = triggerEvent.Content?.Name ?? "unknown";
         var triggerValue = triggerEvent.Content?.Value ?? "unknown";
 
-        _logger.LogInformation("AlwaysRefreshDevice Update - Device: {DeviceId} ({DeviceName}) Type: {DeviceType} | Trigger: {TriggerAttribute}={TriggerValue}", 
+        _logger.LogDebug("AlwaysRefreshDevice Update - Device: {DeviceId} ({DeviceName}) Type: {DeviceType} | Trigger: {TriggerAttribute}={TriggerValue}",
             deviceId, deviceName, deviceType, triggerAttribute, triggerValue);
 
         // Compare and log attribute changes
@@ -231,7 +231,7 @@ public class WebhookController : ControllerBase
                 var oldValue = oldValueObj?.ToString() ?? "null";
                 if (oldValue != newValue)
                 {
-                    _logger.LogInformation("AlwaysRefreshDevice Change - {DeviceId} ({DeviceName}) | {AttributeName}: '{OldValue}' → '{NewValue}'", 
+                    _logger.LogDebug("AlwaysRefreshDevice Change - {DeviceId} ({DeviceName}) | {AttributeName}: '{OldValue}' → '{NewValue}'",
                         deviceId, deviceName, attributeName, oldValue, newValue);
                     changedAttributes.Add(attributeName);
                 }
@@ -239,7 +239,7 @@ public class WebhookController : ControllerBase
             else
             {
                 // New attribute
-                _logger.LogInformation("AlwaysRefreshDevice New - {DeviceId} ({DeviceName}) | {AttributeName}: '{NewValue}' (new attribute)", 
+                _logger.LogDebug("AlwaysRefreshDevice New - {DeviceId} ({DeviceName}) | {AttributeName}: '{NewValue}' (new attribute)",
                     deviceId, deviceName, attributeName, newValue);
                 changedAttributes.Add(attributeName);
             }
@@ -252,7 +252,7 @@ public class WebhookController : ControllerBase
             if (!newAttributes.ContainsKey(attributeName))
             {
                 var oldValue = oldAttr.Value?.ToString() ?? "null";
-                _logger.LogInformation("AlwaysRefreshDevice Removed - {DeviceId} ({DeviceName}) | {AttributeName}: '{OldValue}' (attribute removed)", 
+                _logger.LogDebug("AlwaysRefreshDevice Removed - {DeviceId} ({DeviceName}) | {AttributeName}: '{OldValue}' (attribute removed)",
                     deviceId, deviceName, attributeName, oldValue);
                 changedAttributes.Add(attributeName);
             }
@@ -260,12 +260,12 @@ public class WebhookController : ControllerBase
 
         if (changedAttributes.Count == 0)
         {
-            _logger.LogInformation("AlwaysRefreshDevice NoChanges - {DeviceId} ({DeviceName}) | No attribute changes detected despite refresh trigger", 
+            _logger.LogDebug("AlwaysRefreshDevice NoChanges - {DeviceId} ({DeviceName}) | No attribute changes detected despite refresh trigger",
                 deviceId, deviceName);
         }
         else
         {
-            _logger.LogInformation("AlwaysRefreshDevice Summary - {DeviceId} ({DeviceName}) | {ChangeCount} attributes changed: {ChangedAttributes}", 
+            _logger.LogDebug("AlwaysRefreshDevice Summary - {DeviceId} ({DeviceName}) | {ChangeCount} attributes changed: {ChangedAttributes}",
                 deviceId, deviceName, changedAttributes.Count, string.Join(", ", changedAttributes));
         }
     }

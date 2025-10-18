@@ -5,9 +5,13 @@ namespace HubitatMqtt.Common;
 
 public class MqttBuilder
 {
-    private static int _reconnectAttempts = 0;
-    private static readonly object _reconnectLock = new object();
-    private static DateTime _lastReconnectAttempt = DateTime.MinValue;
+    // Per-client reconnection state to avoid lock contention
+    private class ReconnectionState
+    {
+        public int Attempts { get; set; }
+        public DateTime LastAttempt { get; set; } = DateTime.MinValue;
+        public readonly object Lock = new();
+    }
     public static IMqttClient CreateClientWithoutConnection(ILogger logger, IConfiguration configuration)
     {
         var mqttFactory = new MqttClientFactory();
@@ -31,19 +35,20 @@ public class MqttBuilder
         }
 
         var options = optionsBuilder.Build();
+        var reconnectionState = new ReconnectionState();
 
         // Setup reconnection handler with exponential backoff
         mqttClient.DisconnectedAsync += async (e) =>
         {
-            await HandleReconnectionAsync(mqttClient, options, logger, e);
+            await HandleReconnectionAsync(mqttClient, options, logger, reconnectionState, e);
         };
 
         mqttClient.ConnectedAsync += (e) =>
         {
             // Reset reconnection attempts on successful connection
-            lock (_reconnectLock)
+            lock (reconnectionState.Lock)
             {
-                _reconnectAttempts = 0;
+                reconnectionState.Attempts = 0;
             }
             logger.LogInformation("Connected to MQTT broker successfully");
             return Task.CompletedTask;
@@ -84,18 +89,20 @@ public class MqttBuilder
 
         if (!shortLived)
         {
+            var reconnectionState = new ReconnectionState();
+
             // Setup reconnection handler with exponential backoff
             mqttClient.DisconnectedAsync += async (e) =>
             {
-                await HandleReconnectionAsync(mqttClient, options, logger, e);
+                await HandleReconnectionAsync(mqttClient, options, logger, reconnectionState, e);
             };
 
             mqttClient.ConnectedAsync += (e) =>
             {
                 // Reset reconnection attempts on successful connection
-                lock (_reconnectLock)
+                lock (reconnectionState.Lock)
                 {
-                    _reconnectAttempts = 0;
+                    reconnectionState.Attempts = 0;
                 }
                 logger.LogInformation("Connected to MQTT broker successfully");
                 return Task.CompletedTask;
@@ -115,7 +122,7 @@ public class MqttBuilder
         return mqttClient;
     }
 
-    private static async Task HandleReconnectionAsync(IMqttClient mqttClient, MqttClientOptions options, ILogger logger, MqttClientDisconnectedEventArgs e)
+    private static async Task HandleReconnectionAsync(IMqttClient mqttClient, MqttClientOptions options, ILogger logger, ReconnectionState state, MqttClientDisconnectedEventArgs e)
     {
         const int maxReconnectAttempts = 10;
         const int baseDelaySeconds = 2;
@@ -129,10 +136,10 @@ public class MqttBuilder
         }
 
         int currentAttempt;
-        lock (_reconnectLock)
+        lock (state.Lock)
         {
-            _reconnectAttempts++;
-            currentAttempt = _reconnectAttempts;
+            state.Attempts++;
+            currentAttempt = state.Attempts;
         }
 
         if (currentAttempt > maxReconnectAttempts)
@@ -143,21 +150,21 @@ public class MqttBuilder
 
         // Calculate exponential backoff delay with jitter
         var delaySeconds = Math.Min(baseDelaySeconds * Math.Pow(2, currentAttempt - 1), maxDelaySeconds);
-        var jitter = new Random().NextDouble() * 0.1 * delaySeconds; // Add up to 10% jitter
+        var jitter = Random.Shared.NextDouble() * 0.1 * delaySeconds; // Add up to 10% jitter
         var totalDelay = TimeSpan.FromSeconds(delaySeconds + jitter);
 
-        logger.LogWarning("MQTT disconnected (Reason: {Reason}). Attempt {Attempt}/{MaxAttempts} to reconnect in {Delay} seconds", 
+        logger.LogWarning("MQTT disconnected (Reason: {Reason}). Attempt {Attempt}/{MaxAttempts} to reconnect in {Delay} seconds",
             e.Reason, currentAttempt, maxReconnectAttempts, totalDelay.TotalSeconds);
 
         // Prevent too frequent reconnection attempts
-        var timeSinceLastAttempt = DateTime.UtcNow - _lastReconnectAttempt;
+        var timeSinceLastAttempt = DateTime.UtcNow - state.LastAttempt;
         if (timeSinceLastAttempt < TimeSpan.FromSeconds(1))
         {
             await Task.Delay(TimeSpan.FromSeconds(1));
         }
 
         await Task.Delay(totalDelay);
-        _lastReconnectAttempt = DateTime.UtcNow;
+        state.LastAttempt = DateTime.UtcNow;
 
         try
         {
@@ -170,9 +177,9 @@ public class MqttBuilder
             else
             {
                 logger.LogDebug("MQTT client already connected, skipping reconnection attempt");
-                lock (_reconnectLock)
+                lock (state.Lock)
                 {
-                    _reconnectAttempts = 0;
+                    state.Attempts = 0;
                 }
             }
         }
