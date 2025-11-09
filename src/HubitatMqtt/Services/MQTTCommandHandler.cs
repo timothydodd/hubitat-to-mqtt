@@ -1,5 +1,6 @@
 ﻿using System.Text.RegularExpressions;
 using MQTTnet;
+using HubitatMqtt.Services;
 
 namespace HubitatToMqtt
 {
@@ -9,6 +10,8 @@ namespace HubitatToMqtt
         private readonly IConfiguration _configuration;
         private readonly IMqttClient _mqttClient;
         private readonly HubitatClient _hubitatClient;
+        private readonly MqttPublishService _mqttPublishService;
+        private readonly DeviceCache _deviceCache;
         private readonly string baseTopic;
 
         // Regex source generators for performance
@@ -21,12 +24,16 @@ namespace HubitatToMqtt
             ILogger<MqttCommandHandler> logger,
             IConfiguration configuration,
             IMqttClient mqttClient,
-            HubitatClient hubitatClient)
+            HubitatClient hubitatClient,
+            MqttPublishService mqttPublishService,
+            DeviceCache deviceCache)
         {
             _logger = logger;
             _configuration = configuration;
             _mqttClient = mqttClient;
             _hubitatClient = hubitatClient;
+            _mqttPublishService = mqttPublishService;
+            _deviceCache = deviceCache;
             baseTopic = _configuration["MQTT:BaseTopic"] ?? "hubitat";
         }
 
@@ -185,15 +192,13 @@ namespace HubitatToMqtt
 
                 await _hubitatClient.SendCommand(deviceId, command, value);
 
-                // After sending the command, we should fetch the updated device state
+                // After sending the command, fetch the updated device state
                 // This ensures MQTT topics reflect the new state after the command
                 var device = await _hubitatClient.Get(deviceId);
                 if (device != null)
                 {
-                    // Publish updated device state to MQTT
-                    // You would implement this by calling your existing publish method
-                    // This would require refactoring your PublishDeviceToMqttAsync method to be accessible
-
+                    _deviceCache.AddDevice(device);
+                    await _mqttPublishService.PublishDeviceToMqttAsync(device);
                     _logger.LogDebug("Updated device state after command execution");
                 }
             }
