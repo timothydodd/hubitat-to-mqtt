@@ -164,9 +164,11 @@ public class Device
     public string? Model { get; set; }
     public string? Manufacturer { get; set; }
     public string? Room { get; set; }
+    [JsonConverter(typeof(CapabilitiesConverter))]
     public List<object>? Capabilities { get; set; }
     [JsonConverter(typeof(AttributesConverter))]
     public Dictionary<string, object?>? Attributes { get; set; }
+    [JsonConverter(typeof(CommandsConverter))]
     public List<object>? Commands { get; set; }
 
 }
