@@ -12,9 +12,9 @@ namespace HubitatToMqtt
         private readonly MqttPublishService _mqttPublishService;
         private readonly DeviceCache _deviceCache;
         private DateTime _lastFullPollTime = DateTime.MinValue;
-        private readonly bool _clearTopicOnSync = false;
         private readonly MqttSyncService _mqttSyncService;
         private readonly SyncCoordinator _syncCoordinator;
+        private readonly MqttDeviceReader _mqttDeviceReader;
 
         public Worker(
             ILogger<Worker> logger,
@@ -24,7 +24,8 @@ namespace HubitatToMqtt
             MqttPublishService mqttPublishService,
             DeviceCache deviceCache,
             MqttSyncService mqttSyncService,
-            SyncCoordinator syncCoordinator)
+            SyncCoordinator syncCoordinator,
+            MqttDeviceReader mqttDeviceReader)
         {
             _logger = logger;
             _configuration = configuration;
@@ -32,9 +33,9 @@ namespace HubitatToMqtt
             _hubitatClient = hubitatClient;
             _mqttPublishService = mqttPublishService;
             _deviceCache = deviceCache;
-            _clearTopicOnSync = configuration.GetValue<bool>("ClearTopicOnSync", true);
             _mqttSyncService = mqttSyncService;
             _syncCoordinator = syncCoordinator;
+            _mqttDeviceReader = mqttDeviceReader;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -90,52 +91,82 @@ namespace HubitatToMqtt
 
                 _logger.LogDebug("Full sync lock acquired, fetching all devices from Hubitat");
 
-                _deviceCache.Clear();
-
                 // Fetch data from Hubitat API using the HubitatClient
                 var devices = await _hubitatClient.GetAll();
 
                 // Publish to MQTT if we have data
                 if (devices != null && devices.Count > 0)
                 {
-                    // Update device cache first
+                    // Read current device states from MQTT
+                    _logger.LogDebug("Reading current device states from MQTT");
+                    var deviceIds = devices.Where(d => d.Id != null).Select(d => d.Id!).ToList();
+                    var mqttReadResult = await _mqttDeviceReader.ReadDevicesFromMqttAsync(deviceIds);
+                    _logger.LogDebug("Read {Count} devices from MQTT retained messages, discovered {TotalCount} total device IDs in MQTT",
+                        mqttReadResult.Devices.Count, mqttReadResult.AllDiscoveredDeviceIds.Count);
+
+                    // Detect which devices have changed compared to MQTT state
+                    var changedDevices = new List<Device>();
+                    var unchangedCount = 0;
+
                     foreach (var device in devices)
                     {
                         if (device.Id != null)
                         {
+                            // Compare against MQTT state, not cache
+                            if (!mqttReadResult.Devices.TryGetValue(device.Id, out var mqttDevice) ||
+                                HasDeviceChanged(mqttDevice, device))
+                            {
+                                changedDevices.Add(device);
+                                _logger.LogDebug("Device {DeviceId} ({DeviceName}) has changes, will publish to MQTT",
+                                    device.Id, device.Label ?? device.Name);
+                            }
+                            else
+                            {
+                                unchangedCount++;
+                            }
+
+                            // Update cache with latest data
                             _deviceCache.AddDevice(device);
                         }
                     }
 
-                    // Use batch publishing for better performance
-                    try
-                    {
-                        await _mqttPublishService.PublishDevicesBatchAsync(devices);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to batch publish devices during full sync");
-                    }
+                    _logger.LogInformation("Full sync detected {ChangedCount} changed devices and {UnchangedCount} unchanged devices",
+                        changedDevices.Count, unchangedCount);
 
-                    _lastFullPollTime = DateTime.UtcNow;
-                    
-                    if (_clearTopicOnSync)
+                    // Use batch publishing for better performance - only publish changed devices
+                    if (changedDevices.Count > 0)
                     {
                         try
                         {
-                            var deviceIds = _deviceCache.GetAllDeviceIds();
-                            await _mqttSyncService.SyncDevices(deviceIds);
+                            await _mqttPublishService.PublishDevicesBatchAsync(changedDevices);
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex, "Failed to sync MQTT topics during full poll");
+                            _logger.LogError(ex, "Failed to batch publish devices during full sync");
                         }
+                    }
+                    else
+                    {
+                        _logger.LogInformation("No device changes detected during full sync, skipping MQTT publish");
+                    }
+
+                    _lastFullPollTime = DateTime.UtcNow;
+
+                    // Clean up stale MQTT topics (devices that no longer exist in Hubitat)
+                    try
+                    {
+                        var currentDeviceIds = _deviceCache.GetAllDeviceIds();
+                        await _mqttDeviceReader.CleanupStaleDevicesAsync(currentDeviceIds, mqttReadResult.AllDiscoveredDeviceIds);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to cleanup stale MQTT topics during full poll");
                     }
 
                     // Clear pending webhook updates for devices that were successfully synced
                     var syncedDeviceIds = devices.Where(d => d.Id != null).Select(d => d.Id!).ToHashSet();
                     _syncCoordinator.ClearPendingWebhookUpdates(syncedDeviceIds);
-                    
+
                     // Cleanup unused device locks to prevent memory leaks
                     _syncCoordinator.CleanupUnusedDeviceLocks(syncedDeviceIds);
 
@@ -166,11 +197,11 @@ namespace HubitatToMqtt
         private async Task ProcessPendingWebhookUpdates()
         {
             var pendingDevices = _syncCoordinator.GetDevicesWithPendingWebhookUpdates();
-            
+
             if (pendingDevices.Count > 0)
             {
                 _logger.LogInformation("Processing {Count} devices with pending webhook updates", pendingDevices.Count);
-                
+
                 foreach (var deviceId in pendingDevices)
                 {
                     try
@@ -189,9 +220,91 @@ namespace HubitatToMqtt
                         _logger.LogError(ex, "Failed to process pending webhook update for device {DeviceId}", deviceId);
                     }
                 }
-                
+
                 // Clear the processed updates
                 _syncCoordinator.ClearPendingWebhookUpdates(pendingDevices);
+            }
+        }
+
+        /// <summary>
+        /// Compares two device states to determine if there are any changes
+        /// </summary>
+        private bool HasDeviceChanged(Device? mqttDevice, Device newDevice)
+        {
+            if (mqttDevice == null)
+            {
+                return true; // Device doesn't exist in MQTT, consider it changed
+            }
+
+            // Compare basic properties
+            if (mqttDevice.Label != newDevice.Label ||
+                mqttDevice.Name != newDevice.Name ||
+                mqttDevice.Type != newDevice.Type)
+            {
+                return true;
+            }
+
+            // Compare attributes
+            if (mqttDevice.Attributes == null && newDevice.Attributes == null)
+            {
+                return false; // Both have no attributes, no change
+            }
+
+            if (mqttDevice.Attributes == null || newDevice.Attributes == null)
+            {
+                return true; // One has attributes, the other doesn't
+            }
+
+            if (mqttDevice.Attributes.Count != newDevice.Attributes.Count)
+            {
+                return true; // Different number of attributes
+            }
+
+            // Compare each attribute
+            foreach (var attr in newDevice.Attributes)
+            {
+                if (!mqttDevice.Attributes.TryGetValue(attr.Key, out var mqttValue))
+                {
+                    return true; // New attribute added
+                }
+
+                // Compare attribute values
+                if (!AreAttributeValuesEqual(mqttValue, attr.Value))
+                {
+                    return true;
+                }
+            }
+
+            return false; // No changes detected
+        }
+
+        /// <summary>
+        /// Compares two attribute values for equality
+        /// </summary>
+        private bool AreAttributeValuesEqual(object? value1, object? value2)
+        {
+            if (value1 == null && value2 == null)
+                return true;
+            if (value1 == null || value2 == null)
+                return false;
+
+            // For value types and strings, use direct comparison
+            if (value1 is string || value1.GetType().IsValueType)
+            {
+                return value1.Equals(value2);
+            }
+
+            // For complex types, serialize and compare JSON
+            try
+            {
+                var json1 = System.Text.Json.JsonSerializer.Serialize(value1, Constants.JsonOptions);
+                var json2 = System.Text.Json.JsonSerializer.Serialize(value2, Constants.JsonOptions);
+                return json1 == json2;
+            }
+            catch
+            {
+                // If serialization fails, assume they're different
+                return false;
             }
         }
     }

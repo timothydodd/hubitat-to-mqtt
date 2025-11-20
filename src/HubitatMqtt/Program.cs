@@ -73,6 +73,7 @@ namespace HubitatToMqtt
             builder.Services.AddSingleton<DeviceCache>();
             builder.Services.AddSingleton<MqttSyncService>();
             builder.Services.AddSingleton<SyncCoordinator>();
+            builder.Services.AddSingleton<MqttDeviceReader>();
             // Register MQTT client using factory pattern to avoid blocking startup
             builder.Services.AddSingleton<IMqttClient>(serviceProvider =>
             {
